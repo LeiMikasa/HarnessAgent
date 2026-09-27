@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Local configuration and secrets
+.env
+
+# Harness runtime state: tasks, mailboxes, memory, transcripts, worktrees
+.agent/
+.memory/
+.tasks/
+.transcripts/
+.task_outputs/
+
+# Test scratch space
+.scratch/
+.pip-tmp/
+
+# Local experiments unrelated to the agent harness
+/add.py
+/dfs.py
+/index.html
+/snake.html
+/tank.html
+/java_bfs/
+/sikongzhen/
+/tests/test_add.py
+/tests/test_dfs.py
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
