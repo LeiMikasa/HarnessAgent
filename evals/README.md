@@ -1,4 +1,22 @@
-# 单 Agent 与团队模式耗时评测（试运行）
+# Agent 任务评测（试运行）
+
+## 上下文压缩对照评测
+
+```powershell
+# 免费离线烟测：检查两组任务、压缩触发、归档检索和结果记录
+python -m evals.context_compaction --provider mock
+
+# 真实模型试验：会消耗 API 额度，先配置 .env 并通过 preflight.py --tools
+python -m evals.context_compaction --provider deepseek --repeats 3 --timeout 240
+```
+
+还可运行 `python -m evals.context_compaction --provider mock --case summarization`：这组把准确值放在超长普通历史消息中，使前几级工具结果处理无法解决容量问题，从而触发模型摘要。比较时需把额外的摘要模型调用计入总请求量；若摘要丢失准确值，独立验收会失败。真实模型可分别用 `--case coding`、`--case retention`、`--case summarization` 分批运行，避免一次启动全部场景；`--case all` 则运行三种场景。
+
+脚本包含两个用例：`coding` 要求在长历史之后实现 CSV 解析器，由工作区外的验收脚本检查；`retention` 把随机生成的准确值放在较早的工具输出中，最终请求不重复该值，由工作区外的检查要求写出完全一致的内容。每个用例都有 `full`（不压缩）与 `compact`（自动压缩）两组。成对试验使用相同的模型、初始文件、历史记录、工具集合、轮数预算和验收标准，每次复制新工作区；两组执行顺序交替。历史默认包含 28 组工具调用及结果，每个结果约 5000 字符。可用 `--pairs`、`--result-chars` 调整压力，用 `--case coding` 或 `--case retention` 单独运行。
+
+每次试验写入 `.scratch/evals/context-<时间>/repeat-*/result.json`，整批汇总在 `summary.json`。优先看独立验收成功率、上下文超限次数，再比较双方都成功的成对耗时。`input_chars_sum` 和 `input_chars_max` 是发送给模型的系统提示、消息及工具定义的**字符量**，可用于比较上下文负载；它们不是 token 数或费用。`summary_calls`、`archive_files`、`tool_result_files` 和 `compaction_triggered` 可确认是否真的触发压缩。若压缩没有触发，脚本会提示增加历史规模。
+
+`mock` 使用固定行为的模拟模型，只证明评测流程可运行，不能据此推断压缩提高完成率或节省真实模型成本。真实模型至少重复多次，并扩充不同任务、历史长度与有效信息位置；这个试验目前只有两个合成历史场景，不能代表所有长任务。对于压缩组，如果召回准确值失败，应检查中段归档是否把关键信息移出了模型视野、归档路径是否可读取，以及模型是否实际执行了检索。摘要模型调用也是成本的一部分，不能只看主循环轮数。
 
 ## 项目自身的生命周期基线
 
