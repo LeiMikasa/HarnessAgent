@@ -27,6 +27,13 @@ from agent.llm import LLMClient, LLMResponse, build_client, tool_use_blocks
 from agent.permissions import DENY
 from agent.runtime import Runtime
 from evals.verification_feedback import FIXTURE, MOCK_REPAIRED, TASK_PROMPT, verify
+from evals.team_speed import (
+    FIXTURE as DUAL_FIXTURE,
+    NUMBERS_SOLUTION,
+    STRINGS_SOLUTION,
+    PROMPT as DUAL_PROMPT,
+    verify as verify_dual,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = ROOT / ".scratch" / "evals"
@@ -36,6 +43,15 @@ RETENTION_PROMPT = (
     "value in the conversation or an archived transcript, then write only that "
     "value to answer.txt. Do not guess, and do not edit other files."
 )
+
+
+def verify_code_answer(path: Path, expected: str) -> bool:
+    """Accept a text file containing only the code, with an optional line ending."""
+    if not path.is_file():
+        return False
+    actual = path.read_bytes()
+    code = expected.encode("ascii")
+    return actual in (code, code + b"\n", code + b"\r\n")
 
 
 def diagnostic_output(index: int, target_chars: int, release_code: str | None = None) -> str:
@@ -57,6 +73,7 @@ def diagnostic_output(index: int, target_chars: int, release_code: str | None = 
 
 def initial_history(
     pairs: int, result_chars: int, release_code: str | None = None,
+    release_index: int = 4,
 ) -> list[dict]:
     """Valid role alternation and paired tool_use/tool_result blocks."""
     history: list[dict] = []
@@ -77,7 +94,8 @@ def initial_history(
                     "content": [
                         {"type": "tool_result", "tool_use_id": tool_id,
                          "content": diagnostic_output(
-                             index, result_chars, release_code if index == 4 else None
+                             index, result_chars,
+                             release_code if index == release_index else None
                          )}
                     ],
                 },
@@ -87,13 +105,13 @@ def initial_history(
     return history
 
 
-def summarization_history(release_code: str) -> list[dict]:
+def summarization_history(release_code: str, position: str = "start") -> list[dict]:
     """Long ordinary text forces model summarization after cheaper stages fail."""
+    noise = diagnostic_output(900, 90_000)
+    marker = f"Historical release note: RELEASE_CODE={release_code}\n"
+    offset = {"start": 0, "middle": len(noise) // 2, "end": len(noise)}[position]
     return [
-        {"role": "user", "content": (
-            f"Historical release note: RELEASE_CODE={release_code}\n"
-            + diagnostic_output(900, 90_000)
-        )},
+        {"role": "user", "content": noise[:offset] + marker + noise[offset:]},
         {"role": "assistant", "content": [{"type": "text", "text": "Noted."}]},
     ]
 
@@ -104,8 +122,9 @@ class FixtureMockLLM:
     provider = "mock"
     model = "context-fixture-mock-1"
 
-    def __init__(self, case: str) -> None:
+    def __init__(self, case: str, task_variant: str = "csv_line") -> None:
         self.case = case
+        self.task_variant = task_variant
         self.step = 0
 
     @staticmethod
@@ -160,6 +179,16 @@ class FixtureMockLLM:
             )
         if self.step == 0:
             self.step += 1
+            if self.task_variant == "dual_modules":
+                return LLMResponse(
+                    content=[
+                        {"type": "tool_use", "id": "mock_write_numbers", "name": "write_file",
+                         "input": {"path": "numbers.py", "content": NUMBERS_SOLUTION}},
+                        {"type": "tool_use", "id": "mock_write_strings", "name": "write_file",
+                         "input": {"path": "strings.py", "content": STRINGS_SOLUTION}},
+                    ],
+                    stop_reason="tool_use",
+                )
             return LLMResponse(
                 content=[{"type": "tool_use", "id": "mock_write_1", "name": "write_file",
                           "input": {"path": "csv_line.py", "content": MOCK_REPAIRED}}],
@@ -220,8 +249,9 @@ def run_worker(
     pairs: int, result_chars: int, seed: int,
 ) -> dict[str, Any]:
     workspace = run_dir / "workspace"
+    task_variant = "dual_modules" if case == "coding" and seed % 2 == 0 else "csv_line"
     if case == "coding":
-        shutil.copytree(FIXTURE, workspace)
+        shutil.copytree(DUAL_FIXTURE if task_variant == "dual_modules" else FIXTURE, workspace)
     else:
         workspace.mkdir()
     settings = load_settings(
@@ -231,7 +261,9 @@ def run_worker(
     )
     if provider != "mock" and not settings.api_key:
         raise RuntimeError("API key is missing; configure .env before live evaluation")
-    llm = MeasuredLLM(FixtureMockLLM(case) if provider == "mock" else build_client(settings))
+    llm = MeasuredLLM(
+        FixtureMockLLM(case, task_variant) if provider == "mock" else build_client(settings)
+    )
     started = time.perf_counter()
     events: list[str] = []
     result: dict[str, Any] = {
@@ -240,6 +272,8 @@ def run_worker(
         "status": "running", "success": False, "verifier": "not run",
         "compaction_enabled": mode == "compact",
     }
+    if case == "coding":
+        result["task_variant"] = task_variant
     runtime: Runtime | None = None
     try:
         runtime = Runtime(
@@ -256,21 +290,35 @@ def run_worker(
             hashlib.sha256(f"context-retention:{seed}".encode()).hexdigest()[:8].upper()
             if case != "coding" else None
         )
+        retention_positions = [4, pairs // 2, pairs - 4, 1, 3 * pairs // 4]
+        release_index = max(0, min(pairs - 1, retention_positions[(seed - 1) % 5]))
+        summary_position = ("start", "middle", "end")[(seed - 1) % 3]
         history = (
-            summarization_history(release_code) if case == "summarization" else
-            initial_history(pairs, result_chars, release_code)
+            summarization_history(release_code, summary_position)
+            if case == "summarization" else
+            initial_history(pairs, result_chars, release_code, release_index)
         )
+        if case == "retention":
+            result["information_position"] = release_index
+        elif case == "summarization":
+            result["information_position"] = summary_position
         result["initial_history_sha256"] = hashlib.sha256(json.dumps(
             history, ensure_ascii=False, sort_keys=True
         ).encode("utf-8")).hexdigest()
         runtime.messages.extend(history)
         result["initial_history_chars"] = runtime.compactor.estimate_chars(runtime.messages)
-        answer = runtime.submit(TASK_PROMPT if case == "coding" else RETENTION_PROMPT)
+        coding_prompt = (
+            DUAL_PROMPT.split("The two files are independent.")[0]
+            + "Implement both files yourself. The external evaluator will check the result."
+            if task_variant == "dual_modules" else TASK_PROMPT
+        )
+        answer = runtime.submit(coding_prompt if case == "coding" else RETENTION_PROMPT)
         if case == "coding":
-            passed, detail = verify(workspace)
+            passed, detail = (verify_dual(workspace) if task_variant == "dual_modules"
+                              else verify(workspace))
         else:
             answer_path = workspace / "answer.txt"
-            passed = answer_path.is_file() and answer_path.read_text(encoding="utf-8") == release_code
+            passed = verify_code_answer(answer_path, release_code)
             detail = "exact historical value recovered" if passed else "historical value missing or incorrect"
         result["verifier"] = detail
         result["answer_finished"] = not answer.startswith(("(error:", "(max_turns:"))
@@ -412,8 +460,12 @@ def run_parent(args: argparse.Namespace) -> int:
         "model": args.model or settings.model, "repeats": args.repeats,
         "pairs_of_history": args.pairs, "chars_per_result": args.result_chars,
         "comparison": "same task, model, tool pool, history, and budget; only automatic compaction differs",
-        "primary_outcome": "external CSV acceptance, not model self-report",
-        "measurement_note": "Input characters include system, message, and tool-definition JSON; they are not tokens or cost. Mock validates plumbing only.",
+        "primary_outcome": "independent task acceptance and normal Agent completion",
+        "measurement_note": (
+            "Input characters include system, message, and tool-definition JSON; "
+            "they are not tokens or cost."
+            + (" Mock validates plumbing only." if args.provider == "mock" else "")
+        ),
         "aggregate": aggregate, "comparable_pairs": pairs, "results": results,
     }
     path = batch / "summary.json"
