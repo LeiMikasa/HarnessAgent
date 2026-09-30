@@ -54,6 +54,7 @@ from typing import Any, Callable
 from .events import Hooks
 from .llm import LLMClient, extract_text
 from .tasks import IN_PROGRESS, PENDING, Task, TaskError, TaskStore
+from .todo import TodoList
 from .tools.registry import Tool, ToolContext, ToolRegistry
 
 # --------------------------------------------------------------------------
@@ -609,6 +610,7 @@ class Teammate:
 
         self.state = TeammateState(name=name, role=role, prompt=prompt)
         self.messages: list[dict] = []
+        self.todos = TodoList()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -740,6 +742,7 @@ class Teammate:
 
         self.state.claimed_task = claimed.id
         self.state.status = "working"
+        self.todos.clear()
         self.protocol.bump_work_version(self.name)
         self._bind_worktree(claimed)
         self.messages.append(

@@ -184,7 +184,6 @@ class Runtime:
                 teams=self.teams,
                 tasks=self.tasks,
                 teammate=None,  # replaced per teammate by for_teammate()
-                todos=self.todos,
                 skills=self.skills,
                 mcp=self.mcp,
                 settings=settings,

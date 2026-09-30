@@ -25,6 +25,7 @@ from agent.memory import (
 )
 from agent.tasks import COMPLETED, IN_PROGRESS, PENDING, TaskError, TaskStore, register_task_tools
 from agent.team_tools import TeammateToolRuntime, register_teammate_team_tools
+from agent.todo import TodoList, run_todo_write
 from agent.teams import (
     PLAN_DECISION,
     PLAN_REQUEST,
@@ -1077,6 +1078,22 @@ class TeammateTests(HarnessCase):
         self.assertIn("finished", teammate.state.last_output)
         self.assertEqual(len(llm.calls), 2)
 
+    def test_teammate_context_uses_its_own_todos(self):
+        teammate, _llm, _tasks, _bus, _protocol = self.build(script=[])
+        context = teammate._tool_context()
+        self.assertIs(context.runtime.todos, teammate.todos)
+        run_todo_write({"todos": [{"content": "private step"}]}, context)
+        self.assertEqual(teammate.todos.items[0].content, "private step")
+
+    def test_newly_claimed_task_clears_previous_todos(self):
+        teammate, _llm, tasks, _bus, _protocol = self.build(script=[], autonomous=True)
+        teammate.todos.replace([{"content": "previous task step"}])
+        task = tasks.create("New task")
+
+        self.assertEqual(teammate._find_work(), (True, True))
+        self.assertEqual(teammate.state.claimed_task, task.id)
+        self.assertEqual(teammate.todos.total, 0)
+
     def test_message_arriving_during_idle_wait_runs_a_turn(self):
         teammate, _llm, _tasks, bus, _protocol = self.build(
             script=[], autonomous=False, idle_rounds=2
@@ -1569,10 +1586,40 @@ class TeamManagerTests(HarnessCase):
 
         class FakeTeammate:
             name = "worker"
+            todos = TodoList()
 
         specific = adapter.for_teammate(FakeTeammate())
         self.assertIs(specific.teammate.name, "worker")
         self.assertIsNot(specific, adapter)
+        self.assertIs(specific.todos, FakeTeammate.todos)
+
+    def test_teammate_todo_writes_are_isolated(self):
+        runtime = self.make_runtime()
+        adapter = runtime.teams.tool_runtime
+
+        class FakeTeammate:
+            def __init__(self, name):
+                self.name = name
+                self.todos = TodoList()
+
+        first = FakeTeammate("first")
+        second = FakeTeammate("second")
+
+        def context(teammate):
+            return ToolContext(
+                settings=runtime.settings,
+                workdir=runtime.settings.workdir,
+                owner=teammate.name,
+                interactive=False,
+                runtime=adapter.for_teammate(teammate),
+            )
+
+        run_todo_write({"todos": [{"content": "first step"}]}, context(first))
+        run_todo_write({"todos": [{"content": "second step"}]}, context(second))
+
+        self.assertEqual(first.todos.items[0].content, "first step")
+        self.assertEqual(second.todos.items[0].content, "second step")
+        self.assertEqual(runtime.todos.total, 0)
 
 
 class TeamIntegrationTests(HarnessCase):

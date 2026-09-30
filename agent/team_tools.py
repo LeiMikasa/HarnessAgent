@@ -23,6 +23,7 @@ from typing import Any
 
 from .tasks import TaskStore
 from .teams import TeamManager, Teammate
+from .todo import TodoList
 from .tools.registry import ToolContext, ToolRegistry
 
 
@@ -38,7 +39,7 @@ class TeammateToolRuntime:
     teams: TeamManager
     tasks: TaskStore
     teammate: Teammate
-    todos: Any = None
+    todos: TodoList | None = None
     skills: Any = None
     mcp: Any = None
     settings: Any = None
@@ -50,12 +51,12 @@ class TeammateToolRuntime:
         return None
 
     def for_teammate(self, teammate: Teammate) -> "TeammateToolRuntime":
-        """A per-teammate view, so `submit_plan` reaches the right colleague."""
+        """Route team tools and the private Todo list to this teammate."""
         return TeammateToolRuntime(
             teams=self.teams,
             tasks=self.tasks,
             teammate=teammate,
-            todos=self.todos,
+            todos=teammate.todos,
             skills=self.skills,
             mcp=self.mcp,
             settings=self.settings,
