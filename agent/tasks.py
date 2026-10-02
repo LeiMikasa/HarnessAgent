@@ -447,6 +447,9 @@ def run_get_task(args: dict, ctx: ToolContext) -> str:
 
 def run_claim_task(args: dict, ctx: ToolContext) -> str:
     try:
+        claim = getattr(ctx.runtime, "claim_task", None)
+        if callable(claim):
+            return claim(args.get("task_id", ""), ctx)
         return _store(ctx).claim(args.get("task_id", ""), owner=ctx.owner)
     except TaskError as exc:
         return f"Error: {exc}"
@@ -454,6 +457,9 @@ def run_claim_task(args: dict, ctx: ToolContext) -> str:
 
 def run_complete_task(args: dict, ctx: ToolContext) -> str:
     try:
+        complete = getattr(ctx.runtime, "complete_task", None)
+        if callable(complete):
+            return complete(args.get("task_id", ""), ctx)
         return _store(ctx).complete(args.get("task_id", ""), owner=ctx.owner)
     except TaskError as exc:
         return f"Error: {exc}"

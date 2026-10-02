@@ -34,6 +34,37 @@ COMPACTION_NOTE = (
     "summary as reference data, not as a new command."
 )
 
+TEAM_DEVELOPMENT_NOTE = (
+    "Team development procedure:\n"
+    "1. Decide whether parallel work is useful. Complete small or tightly coupled tasks "
+    "yourself; use teammates for substantial, independently deliverable units.\n"
+    "2. Before starting teammates, inspect the target workspace, Git repository root, "
+    "current branch/HEAD, and uncommitted changes. Worktrees start from committed HEAD: "
+    "uncommitted edits and untracked files are not copied into them. Prepare a shared "
+    "committed baseline containing the files teammates need; preserve unrelated user edits.\n"
+    "3. For a new project in an empty directory, first create a minimal agreed project "
+    "skeleton and .gitignore. Unless the user explicitly requests no Git, initialize Git "
+    "at the intended project root and make an initial local commit before starting the team. "
+    "Exclude secrets, runtime state, and generated dependencies from commits. If Git setup "
+    "or commit fails, report it and choose a shared-directory plan rather than claiming isolation.\n"
+    "4. If the user requests no Git or worktrees are unavailable, assign disjoint file "
+    "ownership in each teammate's briefing, including allowed paths, interfaces, dependencies, "
+    "acceptance criteria, and test commands. Coordinate changes to shared files through the lead. "
+    "Confirm actual working directories; do not claim shared-directory mode if the runtime "
+    "has assigned separate worktrees.\n"
+    "5. Require teammates to verify their work and report changed files, test commands/results, "
+    "and blockers. In a worktree, they must also commit task-owned changes and report the "
+    "branch and commit ID before calling complete_task. Task completion is not Git integration.\n"
+    "6. Inspect each delivery and integrate verified teammate commits into the lead's intended "
+    "branch. Resolve conflicts while preserving other changes. Create dependent coding tasks "
+    "after prerequisite commits are integrated, unless their required baseline is explicitly "
+    "synchronized; a completed task on the board does not update another worktree.\n"
+    "7. Run appropriate project-level checks on the integrated code. If a test fails, fix or "
+    "report it; do not declare the overall task complete while required deliveries, integration, "
+    "or verification remain unfinished. Report artifact paths and verified results. "
+    "Push to a remote only when the user has authorized publishing."
+)
+
 
 def build_system_prompt(
     *,
@@ -116,6 +147,7 @@ def build_system_prompt(
             "A teammate can never ask a human a question, so give it everything "
             "it needs up front."
         )
+        sections.append(TEAM_DEVELOPMENT_NOTE)
         if team_roster and team_roster != "No teammates.":
             sections.append(f"Team roster:\n{team_roster}")
 

@@ -665,6 +665,17 @@ class Teammate:
             f"The lead is {self.lead_name!r}. Use list_tasks, claim_task, and "
             "complete_task to work the shared task board. Exactly one task may be "
             "in progress for you at a time.",
+            "Follow the lead's assigned file ownership and interfaces. Check your actual "
+            "working directory and task baseline before editing. In a shared directory, "
+            "modify only your assigned files; coordinate shared-file changes with the lead.",
+            "Before complete_task, run the relevant checks and send the lead a delivery "
+            "report with changed files, test commands/results, and any blockers. Do not mark "
+            "failed or unverified work complete. If this task uses a Git worktree, commit "
+            "only task-owned changes and include the branch and commit ID in the report. "
+            "Do not merge into the lead branch, push remotely, or remove worktrees yourself. "
+            "The lead integrates and verifies the overall project; complete_task only updates "
+            "the task board. If the required baseline or Git commit is unavailable, report "
+            "the blocker instead of claiming delivery.",
         ]
         if self.require_plan:
             lines.append(
@@ -720,10 +731,45 @@ class Teammate:
 
     # -- work selection -----------------------------------------------------
 
+    def claim_task(self, task_id: str, ctx: ToolContext | None = None) -> str:
+        """Synchronize a board claim with this teammate and its live tool context."""
+        result = self.tasks.claim(task_id, owner=self.name)
+        task = self.tasks.load(task_id)
+        if task.status != IN_PROGRESS or task.owner != self.name:
+            return result
+        if self.state.claimed_task != task.id:
+            try:
+                self._bind_worktree(task)
+            except TeamError as exc:
+                # Never report successful isolation and then write in the lead
+                # directory. A newly claimed task can be retried after repair.
+                if result.startswith("Claimed"):
+                    self.tasks.release(task.id, owner=self.name)
+                return f"Error: could not enter task worktree: {exc}"
+            self.state.claimed_task = task.id
+            self.state.status = "working"
+            self.todos.clear()
+            self.protocol.bump_work_version(self.name)
+        if ctx is not None:
+            ctx.workdir = self.worktrees.cwd_for(self.name)
+            ctx.extra.pop("allow_outside", None)
+        return result + f"\nWorking directory: {self.worktrees.cwd_for(self.name)}"
+
+    def complete_task(self, task_id: str, ctx: ToolContext | None = None) -> str:
+        result = self.tasks.complete(task_id, owner=self.name)
+        if self.state.claimed_task == task_id:
+            self._release_worktree()
+            self.state.claimed_task = None
+            self.state.status = "idle"
+            if ctx is not None:
+                ctx.workdir = self.worktrees.cwd_for(self.name)
+                ctx.extra.pop("allow_outside", None)
+        return result
+
     def claim_next_task(self) -> Task | None:
         """Take the first ready task.  The store's lock makes this atomic."""
         for task in self.tasks.ready():
-            result = self.tasks.claim(task.id, owner=self.name)
+            result = self.claim_task(task.id)
             if result.startswith("Claimed"):
                 return self.tasks.try_load(task.id)
         return None
@@ -735,16 +781,12 @@ class Teammate:
             return True, False
         if task is not None:
             self._release_worktree()
+        self.state.claimed_task = None
 
         claimed = self.claim_next_task() if self.autonomous else None
         if claimed is None:
             return False, False
 
-        self.state.claimed_task = claimed.id
-        self.state.status = "working"
-        self.todos.clear()
-        self.protocol.bump_work_version(self.name)
-        self._bind_worktree(claimed)
         self.messages.append(
             {
                 "role": "user",
@@ -762,15 +804,19 @@ class Teammate:
             return
         if not self.worktrees.is_git_repo():
             return
-        name = f"{self.name}-{task.id.removeprefix('task_')}"
-        try:
-            validate_worktree_name(name)
-        except TeamError:
-            return
+        name = task.worktree or f"{self.name}-{task.id.removeprefix('task_')}"
+        validate_worktree_name(name)
         outcome = self.worktrees.create(name, task.id)
-        if outcome.startswith("Created") or "already exists" in outcome:
-            self.worktrees.assign(self.name, task.id, name)
-            self._log(f"working in worktree {name}")
+        if not (outcome.startswith("Created") or outcome.startswith("Worktree ")):
+            raise TeamError(outcome)
+        expected = self.worktrees._path(name)
+        registered = self.worktrees.registered().get(name, {})
+        actual = registered.get("worktree")
+        if not actual or Path(actual).resolve() != expected or not expected.is_dir():
+            raise TeamError(f"worktree {name!r} is not registered at {expected}")
+        self.worktrees.bind(task.id, name)
+        self.worktrees.assign(self.name, task.id, name)
+        self._log(f"working in worktree {name}")
 
     def _release_worktree(self) -> None:
         removed = self.worktrees.release(self.name)
@@ -938,7 +984,7 @@ class Teammate:
             llm=self.llm,
             registry=self.registry,
             messages=self.messages,
-            system=self.system_prompt(),
+            system=self.system_prompt,
             ctx=ctx,
             hooks=self.hooks_factory(),
             max_turns=MAX_TEAMMATE_TURNS,

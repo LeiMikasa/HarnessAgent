@@ -44,6 +44,12 @@ class TeammateToolRuntime:
     mcp: Any = None
     settings: Any = None
 
+    def claim_task(self, task_id: str, ctx: ToolContext) -> str:
+        return self.teammate.claim_task(task_id, ctx)
+
+    def complete_task(self, task_id: str, ctx: ToolContext) -> str:
+        return self.teammate.complete_task(task_id, ctx)
+
     def spawn_subagent(self, prompt: str, ctx: ToolContext | None = None) -> str:
         return "Error: teammates cannot spawn subagents"
 
