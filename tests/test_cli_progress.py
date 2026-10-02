@@ -51,6 +51,7 @@ class ProgressTests(HarnessCase):
         self.assertNotIn("private-one", "\n".join(progress))
         self.assertNotIn("secret-output", "\n".join(progress))
         self.assertTrue(any("secret-output" in item for item in events))
+        self.assertEqual(len(events), 2)  # model diagnostics are not tool activity
 
     def test_provider_error_reports_progress(self):
         llm = MockLLM()

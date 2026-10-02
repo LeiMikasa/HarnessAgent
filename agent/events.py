@@ -21,6 +21,7 @@ subagent can carry its own hook set without cross-talk.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 # Event names.
@@ -41,6 +42,15 @@ DEFAULT_EVENTS: tuple[str, ...] = (
 )
 
 Hook = Callable[..., Any] # 类似：(*args: Any, **kwargs: Any) -> Any，定义了一个类型别名是Hook
+
+
+@dataclass(frozen=True)
+class StopDirective:
+    """A Stop hook may continue the loop or return a non-final status."""
+
+    action: str  # continue | return
+    message: str = ""
+    stop_reason: str = "final"
 
 
 class Hooks:
