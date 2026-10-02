@@ -43,13 +43,14 @@ Harness commands
   :mcp               connected MCP servers
   :memory            stored memory records
   :notes             diagnostics from the last turn
-  :clear             forget this conversation (keeps tasks and memory)
+  :goal [condition]  show or set a goal and start work; :goal clear cancels
+  :clear             forget this conversation and goal (keeps tasks and memory)
   :quit              exit  (also: q, exit, Ctrl+C, Ctrl+D)
 """
 
-
+# 定义启动时能输入哪些参数
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(       # 创建解析器
         prog="agent",
         description="A modular coding-agent harness.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -215,8 +216,14 @@ def _command(runtime: Runtime, raw: str) -> bool:
             _print(f"  [{record['type']}] {record['name']}: {record['description']}")
     elif name == "notes":
         _print("\n".join(runtime.notes) if runtime.notes else "No notes.")
+    elif name == "goal":
+        try:
+            _print(runtime.goal_command(argument))
+        except ValueError as exc:
+            _print(f"Invalid goal: {exc}")
     elif name == "clear":
         runtime.messages.clear()
+        runtime.goal.clear()
         _print("Conversation cleared.")
     else:
         _print(f"Unknown command :{name}. Try :help")

@@ -63,12 +63,18 @@ s01–s10、s13、s14 章，把它们从"每章一个独立文件"重构成一�
 | s10 | Task System | `agent/tasks.py` |
 | s13 | Agent Teams | `agent/teams.py`、`agent/team_tools.py` |
 | s14 | MCP Plugin | `agent/mcp.py` |
+| s17 | Goal Loop | `agent/goal.py`、`agent/runtime.py` |
 | — | 系统提示词组装 | `agent/prompt.py` |
 | — | 全部接线 | `agent/runtime.py` |
 | — | 终端入口 | `agent/cli.py` |
 | — | 模型接入（含离线 mock） | `agent/llm.py` |
 
-按要求跳过了 **s11（后台任务）、s12（定时任务）、s15/s16/s17**。
+尚未接入 **s11（后台任务）、s12（定时任务）、s15/s16**。
+
+Goal Loop 使用 `:goal <验收条件>`（也支持 `/goal <验收条件>`）设定目标并立即执行。主 Agent 想结束时，独立、无工具的模型调用根据近期对话和工具结果判断目标是否达成；未达成会带着原因继续，同一目标每次请求最多自动续轮 8 次。`:goal` 查看状态，`:goal clear` 取消，新的条件可替换旧条件。评估异常或达到续轮上限会保留目标并返回控制权；队友还在执行关联任务时暂缓判断。目标仅保存在当前 Runtime 会话内。
+离线 `mock` 模式没有真实判断能力；测试通过注入确定性的评估器验证目标循环。
+
+模型仅返回思考、没有正文和工具调用时，不会按正常完成处理：最多自动恢复两次，仍不完整则明确报错。输出因 `max_tokens` 截断的正文会尝试续写；被截断的工具调用不会执行。恢复也受 `AGENT_MAX_TURNS` 总轮数限制。`--verbose` 会显示响应结束原因、正文长度，以及带参数名和结果长度的工具摘要。
 
 ---
 
@@ -94,6 +100,7 @@ HarnessAgent/
     teams.py         s13 队友、信箱、协议、任务绑定 worktree
     team_tools.py    s13 团队工具
     mcp.py           s14 外部能力路由（含 stdio JSON-RPC 客户端）
+    goal.py          s17 独立目标评估与自动续轮
 
     tools/
       registry.py    Tool / ToolContext / ToolRegistry

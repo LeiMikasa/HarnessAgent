@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -39,7 +40,9 @@ from .events import (
     STOP,
     USER_PROMPT_SUBMIT,
     Hooks,
+    StopDirective,
 )
+from .goal import GoalController, GoalEvaluator, PromptGoalEvaluator
 from .llm import LLMClient, build_client
 from .loop import LoopResult, run_loop
 from .mcp import MCPManager, register_mcp_tools
@@ -84,6 +87,7 @@ class Runtime:
         verbose: bool = False,
         on_event: Callable[[str], None] | None = None,
         on_progress: Callable[[str], None] | None = None,
+        goal_evaluator: GoalEvaluator | None = None,
     ):
         self.settings = settings
         self.llm = llm
@@ -131,6 +135,10 @@ class Runtime:
             enabled=compaction_enabled,
             verbose=verbose,
         )
+        if goal_evaluator is None:
+            judge_settings = replace(settings, model=settings.goal_evaluator_model or settings.model)
+            goal_evaluator = PromptGoalEvaluator(build_client(judge_settings))
+        self.goal = GoalController(goal_evaluator, settings.goal_block_cap)
         self.mcp = MCPManager(
             policy={("docs", "search"): "allow", ("docs", "get_version"): "allow",
                     ("docs", "list_topics"): "allow", ("deploy", "trigger"): "confirm"},
@@ -217,7 +225,7 @@ class Runtime:
             approval = ASK
         llm = build_client(settings, script=script, responder=responder)
         # `script` and settings overrides are not Runtime concerns.
-        for key in ("provider", "model", "base_url", "api_key", "workdir", "state_dir", "skill_dirs"):
+        for key in ("provider", "model", "base_url", "api_key", "workdir", "state_dir", "skill_dirs", "goal_evaluator_model", "goal_block_cap"):
             overrides.pop(key, None)
         return cls(settings, llm, approval=approval, **overrides)
 
@@ -229,6 +237,7 @@ class Runtime:
         self.hooks.register(PRE_TOOL_USE, self.permissions.check_hook)
         self.hooks.register(PRE_TOOL_USE, self._log_tool_hook)
         self.hooks.register(POST_TOOL_USE, self._large_output_hook)
+        self.hooks.register(STOP, self._goal_stop_hook)
         self.hooks.register(STOP, self._memory_stop_hook)
         self.hooks.register(USER_PROMPT_SUBMIT, self._user_prompt_hook)
 
@@ -284,7 +293,9 @@ class Runtime:
         from .llm import block_input, block_name
 
         args = block_input(block)
-        preview = str(list(args.values())[:2])[:80]
+        preview = ", ".join(f"{key}={value!r}" for key, value in args.items())
+        if len(preview) > 160:
+            preview = preview[:160] + "..."
         print(f"\033[90m[hook] {block_name(block)}({preview})\033[0m")
         return None
 
@@ -297,6 +308,27 @@ class Runtime:
 
     def _user_prompt_hook(self, query: str) -> None:
         return None
+
+    def _goal_stop_hook(self, messages: list[dict]) -> StopDirective | None:
+        # One-off subagents inherit these hooks, but never own the lead goal.
+        if messages is not self.messages or not self.goal.active:
+            return None
+        outcome = self.goal.judge(messages, background_running=self._goal_background_running())
+        if outcome in ("allow", "achieved"):
+            return None
+        if outcome == "continue":
+            return StopDirective(
+                "continue",
+                "[goal check] The condition is not met yet: " + self.goal.reason
+                + "\nContinue work and gather verifiable evidence before stopping.",
+            )
+        return StopDirective("return", self.goal.reason, f"goal_{outcome}")
+
+    def _goal_background_running(self) -> bool:
+        if self.teams is None:
+            return False
+        owners = {name for name, teammate in self.teams.teammates.items() if teammate.alive}
+        return any(task.owner in owners and task.status != COMPLETED for task in self.tasks.list_all())
 
     def _memory_stop_hook(self, messages: list) -> None:
         """Runs when the model proposes to stop: harvest durable knowledge."""
@@ -329,7 +361,7 @@ class Runtime:
                     self._memory_sections = []
             memory_sections = self._memory_sections
 
-        return build_system_prompt(
+        prompt = build_system_prompt(
             workdir=self.settings.workdir,
             tool_names=self.tools.names(),
             shell=shell_hint(),
@@ -342,6 +374,13 @@ class Runtime:
             team_worktrees_enabled=self.teams.worktrees.enabled if self.teams else False,
             todo_summary=self.todos.summary(),
         )
+        if self.goal.active:
+            prompt += (
+                "\n\nActive goal condition: " + self.goal.condition
+                + "\nKeep working until evidence shows this condition is met. "
+                "A separate judge checks the transcript when you stop."
+            )
+        return prompt
 
     # ------------------------------------------------------------------
     # MCP
@@ -501,6 +540,7 @@ class Runtime:
             before_call=self._inject_team_events,
             on_event=self._emit,
             on_progress=self.on_progress,
+            on_diagnostic=self._emit,
         )
         self.stats.turns += result.turns
         self.stats.tool_calls += result.tool_calls
@@ -508,7 +548,12 @@ class Runtime:
 
     def submit(self, request: str) -> str:
         """Handle one user request end to end and return the final text."""
+        stripped = request.strip()
+        if stripped == "/goal" or stripped.startswith("/goal ") or stripped == ":goal" or stripped.startswith(":goal "):
+            return self.goal_command(stripped[5:].strip())
         self.stats.requests += 1
+        goal_was_active = self.goal.active
+        self.goal.begin_query()
         self.active_request = request
         # A new turn means new inputs: re-select memory exactly once here.
         self._memory_sections = None
@@ -516,6 +561,26 @@ class Runtime:
         self.messages.append({"role": "user", "content": request})
         result = self.run_turn()
         self._collect_notes()
+        return self._present_result(result, goal_was_active=goal_was_active)
+
+    def goal_command(self, argument: str = "") -> str:
+        """Show, replace, clear, or immediately pursue the session goal."""
+        argument = argument.strip()
+        if not argument:
+            return self.goal.summary()
+        if argument.lower() in ("clear", "off", "cancel"):
+            self.goal.clear()
+            return "Goal cleared."
+        self.goal.set(argument)
+        return self.submit(argument)
+
+    def _present_result(self, result: LoopResult, *, goal_was_active: bool = False) -> str:
+        if result.stop_reason.startswith("goal_"):
+            return f"[goal: {result.stop_reason[5:]}] {result.error}" + (f"\n\n{result.text}" if result.text else "")
+        if goal_was_active and self.goal.status == "achieved":
+            return f"[goal: achieved] {self.goal.reason}" + (f"\n\n{result.text}" if result.text else "")
+        if self.goal.active and not result.ok:
+            return f"[goal: active] {result.stop_reason}: {result.error}" + (f"\n\n{result.text}" if result.text and result.text != result.error else "")
         return result.text or f"({result.stop_reason}: {result.error})"
 
     def _collect_notes(self) -> None:
@@ -547,9 +612,9 @@ class Runtime:
             events = self.teams.consume_lead_inbox()
             if events:
                 self._inject(self.messages, self.teams.format_events(events))
+                goal_was_active = self.goal.active
                 result = self.run_turn()
-                if result.text:
-                    answer = result.text
+                answer = self._present_result(result, goal_was_active=goal_was_active)
 
             tasks = self.tasks.list_all()
             unfinished = [task for task in tasks if task.status != COMPLETED]
@@ -566,8 +631,9 @@ class Runtime:
                     "[team] Teammate work has ended. Summarize the completed work "
                     "for the user; do not claim any unverified result.",
                 )
+                goal_was_active = self.goal.active
                 result = self.run_turn()
-                return result.text or answer
+                return self._present_result(result, goal_was_active=goal_was_active) if result.text or result.stop_reason.startswith("goal_") else answer
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -594,6 +660,7 @@ class Runtime:
             f"mcp:        {', '.join(self.mcp.names()) or 'none'}",
             f"turns:      {self.stats.turns}, tool calls: {self.stats.tool_calls}",
             f"permissions:{self.permissions.summary()}",
+            f"goal:       {self.goal.summary()}",
         ]
         if self.teams is not None:
             lines.append(f"team:       {len(self.teams.teammates)} teammate(s)")
