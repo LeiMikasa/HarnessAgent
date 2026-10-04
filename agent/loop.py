@@ -176,13 +176,27 @@ def run_loop(
         # An output-limit response can contain an unfinished tool argument.
         # Never execute it or append an unmatched tool_use to the history.
         if calls and provider_stop == "max_tokens":
-            result.stop_reason = "error"
-            result.error = (
-                "Model output reached max_tokens during a tool call; the tool was not executed. "
-                "Increase AGENT_MAX_TOKENS or request smaller steps, then retry."
+            if incomplete_retries >= MAX_INCOMPLETE_RETRIES:
+                result.stop_reason = "error"
+                result.error = (
+                    "Model output reached max_tokens during a tool call; the tool was not executed. "
+                    "Automatic recovery exhausted. Increase AGENT_MAX_TOKENS or request smaller steps, then retry."
+                )
+                progress("[model] stopped: truncated tool call recovery exhausted")
+                return result
+            incomplete_retries += 1
+            recovery_note = (
+                "[harness recovery] The previous response reached the output limit while generating "
+                "tool calls. None of that response's tool calls were executed; earlier completed "
+                "tool calls remain valid. Regenerate the next step as ONE small, complete tool call. "
+                "Keep reasoning short, split large file writes or edits into smaller chunks, and "
+                "do not assume any discarded tool call succeeded."
             )
-            progress("[model] stopped: tool call was cut off by the output limit")
-            return result
+            progress(
+                f"[model] tool call cut off by output limit; not executed; "
+                f"retry {incomplete_retries}/{MAX_INCOMPLETE_RETRIES} with a smaller step"
+            )
+            continue
 
         # Empty / thinking-only and truncated text are not final answers.
         # Retry within both a small recovery budget and the overall turn cap.
