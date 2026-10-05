@@ -9,6 +9,17 @@ from evals.team_speed import run_worker, verify
 
 
 class TeamSpeedEvalTests(HarnessCase):
+    def test_plan_prompt_uses_teammate_submissions_as_the_default(self):
+        prompt = build_system_prompt(
+            workdir=self.tmp,
+            tool_names=["create_task", "spawn_teammate", "request_plan", "review_plan"],
+            teams_enabled=True,
+            team_requires_plan=True,
+        )
+        self.assertIn("create approval requests automatically", prompt)
+        self.assertIn("request_plan is optional", prompt)
+        self.assertNotIn("-> request_plan ->", prompt)
+
     def test_prompt_does_not_advertise_disabled_workflows(self):
         prompt = build_system_prompt(
             workdir=self.tmp,

@@ -54,7 +54,7 @@ def run_subagent_loop(
     registry: ToolRegistry,
     prompt: str,
     ctx: ToolContext,
-    max_turns: int = 30,
+    max_turns: int = 150,
     hooks: Hooks | None = None,
     system: str | None = None,
     on_event: Callable[[str], None] | None = None,

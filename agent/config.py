@@ -117,8 +117,8 @@ class Settings:
     skill_dirs: list[Path] = field(default_factory=list)
 
     max_tokens: int = 8000
-    max_turns: int = 50
-    subagent_max_turns: int = 30
+    max_turns: int = 150
+    subagent_max_turns: int = 150
     goal_evaluator_model: str | None = None
     goal_block_cap: int = 8
 
@@ -229,9 +229,9 @@ def load_settings(env_file: str | Path | None = None, **overrides) -> Settings:
         state_dir=state_dir,
         skill_dirs=[Path(p).resolve() for p in skill_dirs],
         max_tokens=int(overrides.get("max_tokens") or _env_int("AGENT_MAX_TOKENS", 8000)),
-        max_turns=int(overrides.get("max_turns") or _env_int("AGENT_MAX_TURNS", 50)),
+        max_turns=int(overrides.get("max_turns") or _env_int("AGENT_MAX_TURNS", 150)),
         subagent_max_turns=int(
-            overrides.get("subagent_max_turns") or _env_int("AGENT_SUBAGENT_MAX_TURNS", 30)
+            overrides.get("subagent_max_turns") or _env_int("AGENT_SUBAGENT_MAX_TURNS", 150)
         ),
         goal_evaluator_model=overrides.get("goal_evaluator_model") or os.getenv("GOAL_EVALUATOR_MODEL_ID") or None,
         goal_block_cap=int(overrides.get("goal_block_cap") or _env_int("AGENT_GOAL_BLOCK_CAP", 8)),

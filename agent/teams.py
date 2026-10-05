@@ -66,7 +66,7 @@ WORKTREE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 IDLE_SCAN_INTERVAL = 2.0      # 没事做时大约每2秒检查一次
 DEFAULT_IDLE_ROUNDS = 15      # 连续空闲超过15次后退出
-MAX_TEAMMATE_TURNS = 40       # 每次调用Agent主循环最多跑40轮
+MAX_TEAMMATE_TURNS = 150      # 每次调用Agent主循环最多跑150轮
 
 # Message types.
 MESSAGE = "message"
@@ -680,7 +680,10 @@ class Teammate:
         if self.require_plan:
             lines.append(
                 "Before doing any file modification, you must have an approved "
-                "plan. Use submit_plan, then wait for the lead's decision."
+                "plan. Use submit_plan to create an approval request and send your "
+                "plan; you do not need the lead to call request_plan first. Then "
+                "stop this turn and wait for the lead's decision. If rejected, "
+                "revise and call submit_plan again to request another review."
             )
         if self.state.claimed_task:
             lines.append(f"You have claimed {self.state.claimed_task}.")
@@ -998,9 +1001,19 @@ class Teammate:
     # -- teammate-facing tools ---------------------------------------------
 
     def submit_plan(self, plan: str) -> str:
-        request_id = self.protocol.plan_request_ids.get(self.name, "")
-        if not request_id:
-            return "Error: no plan was requested by the lead"
+        """Send a plan, opening a review request when none is outstanding."""
+        with self.protocol.lock:
+            request_id = self.protocol.plan_request_ids.get(self.name, "")
+            request = self.protocol.pending.get(request_id)
+            if (
+                request is None
+                or request.resolved
+                or request.kind != "plan"
+                or request.teammate != self.name
+            ):
+                request = self.protocol.create("plan", self.name, task_id=self.state.claimed_task)
+            request_id = request.request_id
+            self.protocol.plan_gates[self.name] = "pending"
         self.bus.send(
             self.name,
             self.lead_name,
@@ -1013,8 +1026,7 @@ class Teammate:
                 "task_id": self.state.claimed_task,
             },
         )
-        self.protocol.plan_gates[self.name] = "pending"
-        return f"Plan submitted to {self.lead_name}; awaiting the decision."
+        return f"Plan submitted to {self.lead_name} (request {request_id}); awaiting the decision."
 
     def send_message(self, to: str, content: str) -> str:
         self.bus.send(self.name, to, content)

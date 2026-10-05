@@ -342,6 +342,12 @@ Lead agent                          队友 "researcher"
 协议消息（计划申请/回复、关闭申请/回复）靠 `request_id` 关联，
 迟到的或伪造的回复会被 `match_response` 拒掉（校验类型 + 发起人 + 是否已解决）。
 
+开启 `require_plan=True` 后，队友先调查代码，再调用 `submit_plan` 自动创建审批请求并发送方案；
+主 agent 收到带 `request_id` 的消息后直接调用 `review_plan`。未批准时，
+`bash`、`write_file`、`edit_file` 仍被计划钩子拦截。等待审批期间再次提交复用未处理请求；
+审批结束后再次提交（例如修改被拒绝的方案）会创建新请求，并重新等待审批。
+`request_plan` 保留为主 agent 主动要求新方案的可选工具，不再是队友首次提交的前提。
+
 ### s14 MCP —— `mcp.py`
 
 ```

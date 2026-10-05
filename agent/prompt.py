@@ -137,9 +137,17 @@ def build_system_prompt(
             "Workflow: create_task for each unit of work -> spawn_teammate with a "
             "self-contained briefing"
         )
-        if team_requires_plan and "request_plan" in tool_names:
-            workflow += " -> request_plan -> review_plan once a plan arrives"
+        if team_requires_plan and "review_plan" in tool_names:
+            workflow += (
+                " -> teammates submit their plans and create approval requests automatically"
+                " -> review_plan using the request_id once a plan arrives"
+            )
         workflow += " -> read their messages -> verify the completed work."
+        if team_requires_plan and "request_plan" in tool_names:
+            workflow += (
+                " request_plan is optional: use it to explicitly ask for a new plan, "
+                "not as a prerequisite for submit_plan."
+            )
         sections.append(
             "You lead a team. Teammates run in parallel with their own context "
             "and task claims. Divide genuinely independent work; do not spawn "

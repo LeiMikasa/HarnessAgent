@@ -86,7 +86,7 @@ def run_loop(
     system: str | Callable[[], str],
     ctx: ToolContext,
     hooks: Hooks | None = None,
-    max_turns: int = 50,
+    max_turns: int = 150,
     compactor: ContextCompactor | None = None,
     active_request: str = "",
     before_call: Callable[[list[dict]], None] | None = None,

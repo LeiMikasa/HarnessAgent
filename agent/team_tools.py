@@ -9,8 +9,9 @@ approval, report back.
     spawn_teammate            -> roster
     list_teammates            <- status
     send_message              <-> mailbox
-    request_plan              -> ask           submit_plan
-    review_plan               <- decide
+    review_plan               <- plan request  submit_plan
+    request_plan              -> optional ask  submit_plan
+    review_plan               -> decision
     request_shutdown          -> stop
     create_worktree           -> isolation
     create_task/claim_task    <-> shared board
@@ -335,7 +336,8 @@ def register_lead_team_tools(registry: ToolRegistry) -> ToolRegistry:
     registry.add("send_message", "Send a message to a teammate's mailbox.", SEND_MESSAGE_SCHEMA, run_send_message)
     registry.add(
         "request_plan",
-        "Ask a teammate for a plan before it modifies files.",
+        "Explicitly ask a teammate for a new plan. Optional: teammates can create "
+        "approval requests themselves with submit_plan.",
         REQUEST_PLAN_SCHEMA,
         run_request_plan,
     )
@@ -372,7 +374,9 @@ def register_teammate_team_tools(registry: ToolRegistry) -> ToolRegistry:
     """Coordination tools a teammate may call."""
     registry.add(
         "submit_plan",
-        "Submit a plan to the lead and wait for approval before modifying files.",
+        "Submit a plan to the lead, automatically creating an approval request if needed. "
+        "No prior request_plan is required. Then stop this turn and wait for approval "
+        "before modifying files. Resubmit a revised plan after rejection for a new review.",
         SUBMIT_PLAN_SCHEMA,
         run_submit_plan,
     )

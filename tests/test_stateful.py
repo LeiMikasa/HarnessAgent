@@ -1483,9 +1483,57 @@ class TeammateTests(HarnessCase):
         self.assertEqual(ack[0].type, SHUTDOWN_RESPONSE)
         self.assertEqual(ack[0].metadata["request_id"], "req_000009")
 
-    def test_submit_plan_without_a_request_is_an_error(self):
-        teammate, _llm, _tasks, _bus, _protocol = self.build(script=["x"])
-        self.assertIn("no plan was requested", teammate.submit_plan("my plan"))
+    def test_submit_plan_without_a_lead_request_creates_one(self):
+        teammate, _llm, tasks, bus, protocol = self.build(script=[], require_plan=True)
+        teammate.worktrees.enabled = False
+        task = tasks.create("Write parser")
+        teammate.claim_task(task.id)
+
+        outcome = teammate.submit_plan("Read the code, implement the parser, then test.")
+
+        request_id = protocol.plan_request_ids["worker"]
+        request = protocol.pending[request_id]
+        self.assertIn(request_id, outcome)
+        self.assertEqual(request.kind, "plan")
+        self.assertEqual(request.teammate, "worker")
+        self.assertEqual(request.task_id, task.id)
+        self.assertEqual(request.work_version, protocol.work_versions["worker"])
+        self.assertFalse(request.resolved)
+        self.assertEqual(protocol.plan_gates["worker"], "pending")
+        response = bus.read_inbox("lead")[0]
+        self.assertEqual(response.type, PLAN_RESPONSE)
+        self.assertEqual(response.metadata["request_id"], request_id)
+        self.assertIs(protocol.match_response(response.type, request_id, response.sender), request)
+
+    def test_submit_plan_reuses_an_outstanding_lead_request(self):
+        teammate, _llm, _tasks, bus, protocol = self.build(script=[], require_plan=True)
+        request = protocol.create("plan", "worker")
+        teammate.submit_plan("First version")
+        teammate.submit_plan("Updated version")
+
+        responses = bus.read_inbox("lead")
+        self.assertEqual(len(protocol.pending), 1)
+        self.assertEqual([m.metadata["request_id"] for m in responses], [request.request_id] * 2)
+        self.assertEqual(responses[-1].content, "Updated version")
+
+    def test_submit_plan_after_a_decision_creates_a_new_review(self):
+        for approved in (False, True):
+            with self.subTest(approved=approved):
+                teammate, _llm, _tasks, bus, protocol = self.build(script=[], require_plan=True)
+                teammate.submit_plan("Original plan")
+                previous = protocol.pending[protocol.plan_request_ids["worker"]]
+                protocol.resolve(previous, approved, "Decision")
+                bus.read_inbox("lead")
+
+                teammate.submit_plan("Revised plan")
+
+                current_id = protocol.plan_request_ids["worker"]
+                self.assertNotEqual(current_id, previous.request_id)
+                self.assertTrue(previous.resolved)
+                self.assertFalse(protocol.pending[current_id].resolved)
+                self.assertEqual(protocol.plan_gates["worker"], "pending")
+                self.assertFalse(protocol.plan_approved("worker"))
+                self.assertEqual(bus.read_inbox("lead")[0].metadata["request_id"], current_id)
 
 
 class TeamManagerTests(HarnessCase):
@@ -1642,6 +1690,48 @@ class TeamIntegrationTests(HarnessCase):
                     if isinstance(block, dict) and block.get("type") == "text":
                         parts.append(str(block.get("text", "")))
         return "\n".join(parts)
+
+    def test_teammate_submits_and_waits_for_review_without_request_plan(self):
+        runtime = self.make_runtime(require_plan=True)
+        runtime.teams.worktrees.enabled = False
+        task = runtime.tasks.create("Write parser.py", "Create the parser and verify it.")
+        runtime.llm.script = [
+            {"tool": "submit_plan", "input": {"plan": "Create parser.py, then verify it."}},
+            {"tool": "write_file", "input": {"path": "parser.py", "content": "value = 1\n"}},
+            "Waiting for approval.",
+            {"tool": "write_file", "input": {"path": "parser.py", "content": "value = 1\n"}},
+            {"tool": "complete_task", "input": {"task_id": task.id}},
+            "Finished.",
+        ]
+        # Drive the real loops synchronously to inspect the approval boundary.
+        from unittest.mock import patch
+        with patch.object(Teammate, "start"):
+            runtime.teams.spawn("writer", "implementer", "Implement parser.py.")
+        teammate = runtime.teams.get("writer")
+        teammate.claim_task(task.id)
+
+        teammate._run_turn()
+
+        self.assertFalse((self.tmp / "parser.py").exists())
+        self.assertEqual(runtime.tasks.load(task.id).status, IN_PROGRESS)
+        self.assertEqual(runtime.teams.protocol.plan_gates["writer"], "pending")
+        self.assertIn("Blocked: plan status is pending", str(teammate.messages))
+        events = runtime.teams.consume_lead_inbox()
+        self.assertIn("submitted a plan", events[0])
+        request_id = runtime.teams.protocol.plan_request_ids["writer"]
+        self.assertIn(request_id, events[0])
+
+        runtime.execute_tool({
+            "type": "tool_use", "id": "review", "name": "review_plan",
+            "input": {"request_id": request_id, "approve": True, "feedback": "Proceed."},
+        })
+        self.assertTrue(teammate._queue_inbox())
+        teammate._run_turn()
+
+        self.assertTrue((self.tmp / "parser.py").exists(), str(teammate.messages))
+        self.assertEqual((self.tmp / "parser.py").read_text(encoding="utf-8"), "value = 1\n")
+        self.assertEqual(runtime.tasks.load(task.id).status, COMPLETED)
+        self.assertNotIn("request_plan", self.called_tools(runtime))
 
     def test_lead_delegates_and_the_teammate_claims_and_finishes(self):
         state = {"spawned": False, "teammate_turns": 0}
