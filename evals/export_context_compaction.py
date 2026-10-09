@@ -6,12 +6,15 @@ import argparse
 import json
 from pathlib import Path
 
+from evals.token_usage import aggregate_token_usage, token_comparison
+
 
 TRIAL_FIELDS = (
     "case", "mode", "repeat", "task_variant", "information_position",
     "status", "success", "original_status", "answer_finished",
     "compaction_triggered", "model_calls", "summary_calls", "tool_calls",
     "context_errors", "input_chars_sum", "input_chars_max", "elapsed_seconds",
+    "usage_by_call", "usage_calls", "usage_missing_calls", "token_usage_complete", "token_totals",
 )
 
 
@@ -32,6 +35,7 @@ def export(source: Path, destination: Path) -> None:
             "summary_calls": sum(result["summary_calls"] for result in arm),
             "context_errors": sum(result["context_errors"] for result in arm),
             "compaction_triggered": sum(result["compaction_triggered"] for result in arm),
+            **aggregate_token_usage(arm),
         }
     data = {
         "provider": summary["provider"],
@@ -46,6 +50,7 @@ def export(source: Path, destination: Path) -> None:
         ) if summary["provider"] != "mock" else summary["measurement_note"],
         "aggregate_by_case": summary["aggregate"],
         "totals": totals,
+        "token_comparison": token_comparison(totals["full"], totals["compact"]),
         "trials": trials,
     }
     destination.parent.mkdir(parents=True, exist_ok=True)

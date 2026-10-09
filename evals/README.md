@@ -1,5 +1,9 @@
 # Agent 任务评测（试运行）
 
+## 50 组逐项召回与 token 对照
+
+新增固定的 50 个合成测试条件，覆盖分散信息、多条约束、版本修订、相似干扰及长文本摘要。每例检查六项已知信息及一项正确拒答，计算逐项召回率、整例通过率、原始供应商 token 用量和成对降幅。先运行 `python -m evals.recall50 --provider mock` 检查流程；真实运行使用 `--provider deepseek`，默认 100 次 Agent 运行，每次可能有多个模型调用。可用 `--limit 5` 小批量试跑及 `--resume` 续跑。完整设计、指标定义和费用边界见 [使用说明](../docs/50组上下文召回评测使用说明.md)。
+
 ## 上下文压缩对照评测
 
 已完成的 15 组真实模型对照试验见 [评测报告](../docs/上下文压缩评测报告.md) 和 [逐次运行数据](results/context-compaction-2026-09-29.json)。报告注明了验收规则修正及结论边界。
@@ -20,6 +24,10 @@ python -m evals.context_compaction --provider deepseek --repeats 3 --timeout 240
 
 `mock` 使用固定行为的模拟模型，只证明评测流程可运行，不能据此推断压缩提高完成率或节省真实模型成本。真实模型至少重复多次，并扩充不同任务、历史长度与有效信息位置；当前三类任务仍是合成历史，不能代表所有长任务。每组成功率按独立验收通过且 Agent 正常结束的次数除以总运行次数计算；超时、报错和验收失败都计为失败。对于压缩组，如果召回准确值失败，应检查中段归档是否把关键信息移出了模型视野、归档路径是否可读取，以及模型是否实际执行了检索。摘要模型调用也是成本的一部分，不能只看主循环轮数。
 
+压缩评测现在也记录供应商响应的实际 token 用量：每次运行的 `usage_by_call` 保留原始 `usage` 并标记 `agent` / `summary`，`token_totals` 分别累计 `input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`。摘要调用包含在累计值内。`summary.json` 中的分类汇总及 `token_totals_by_mode` 提供组内总量，`comparable_pairs` 的 `token_reduction_percent` 提供双方成功时的成对降幅；导出文件还包含两组总体的 `token_comparison`。负降幅表示用量增加。
+
+`usage_calls` / `usage_missing_calls` 记录用量报告覆盖情况；只有全部调用都有有效输入和输出计数时，`token_usage_complete` 才为真。任何调用缺失某个计数，该字段累计值及相应降幅为 `null`，不会以零或部分总量替代。Mock 和旧批次没有真实用量，仍显示未知。所有计数沿用供应商字段含义，缓存分别记录，不自动相加推断总输入或费用；嵌套的推理 token 等信息保留在原始 `usage` 中，避免与输出总数重复计算。SDK 内部重试的未返回用量也无法事后恢复。历史 15 组试验不会因此获得 token 数据。
+
 ## 项目自身的生命周期基线
 
 ```powershell
@@ -39,7 +47,7 @@ python -m evals.team_speed --provider deepseek --repeats 3 --timeout 240
 
 每次试验都从相同的 `dual_modules` 初始文件复制出全新工作目录，并使用独立状态目录。两组收到完全相同的任务描述；单 Agent 组不提供团队工具，团队组要求创建任务、启动一位队友并行实现另一个文件。短生命周期 `task` subagent、shell 命令、MCP 连接、记忆和压缩在两组均关闭；计划审批和 Git worktree 也关闭，以便评测共享目录中的团队协作。工作区外的文件写入仍被拒绝。验收脚本位于工作目录之外，不会被被测 Agent 修改。
 
-计时从 Runtime 创建前开始，到独立验收通过并关闭队友后结束；`submit()` 返回或任务标记完成都不算成功。每次运行记录总模型请求数（含队友）、工具调用数、任务状态、队友状态、验收结果及耗时。结果保存在 `.scratch/evals/<batch>/summary.json`，试验工作目录保留供排查。模型 token/费用暂不可从现有 `LLMResponse` 获取，不应把请求数当作费用。
+计时从 Runtime 创建前开始，到独立验收通过并关闭队友后结束；`submit()` 返回或任务标记完成都不算成功。每次运行记录总模型请求数（含队友）、工具调用数、任务状态、队友状态、验收结果及耗时。结果保存在 `.scratch/evals/<batch>/summary.json`，试验工作目录保留供排查。`LLMResponse.usage` 已保留供应商用量，但当前团队耗时脚本尚未汇总 token 和费用，不应把请求数当作费用。
 
 `mock` 只验证评测器流程，耗时毫无模型性能意义。真实模型至少应重复 3 次、交错两组执行，且仅在两组都验收通过、团队组确实使用了队友时比较成对耗时。本例仅含一个小任务，不足以代表团队协作的一般收益；后续应增加不同大小、不同可并行度的任务，并统计成功率和失败类型。运行真实模型会消耗 API 额度。
 

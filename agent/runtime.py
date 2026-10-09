@@ -140,6 +140,7 @@ class Runtime:
             goal_evaluator = PromptGoalEvaluator(build_client(judge_settings))
         self.goal = GoalController(goal_evaluator, settings.goal_block_cap)
         self.mcp = MCPManager(
+            retry_safe_tools={("docs", "search"), ("docs", "get_version"), ("docs", "list_topics")},
             policy={("docs", "search"): "allow", ("docs", "get_version"): "allow",
                     ("docs", "list_topics"): "allow", ("deploy", "trigger"): "confirm"},
             verbose=verbose,

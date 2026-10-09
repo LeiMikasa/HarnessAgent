@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .tools.registry import ToolContext, ToolRegistry
+from .tools.result import ToolResult
 
 PENDING = "pending"
 IN_PROGRESS = "in_progress"
@@ -204,7 +205,7 @@ def run_todo_write(args: dict, ctx: ToolContext) -> str:
     try:
         items = target.replace(todos)
     except TodoValidationError as exc:
-        return f"Error: {exc}"
+        return ToolResult.failure('INVALID_ARGUMENT', f"Error: {exc}", action='correct_arguments', execution_status='not_executed')
 
     if not items:
         return "Cleared the todo list."

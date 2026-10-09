@@ -37,6 +37,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .tools.registry import ToolContext, ToolRegistry
+from .tools.result import ToolResult
 
 TASK_ID_PATTERN = re.compile(r"^task_[0-9a-f]{8}$")
 # 任务状态
@@ -409,7 +410,7 @@ def run_create_task(args: dict, ctx: ToolContext) -> str:
     try:
         task = store.create(args.get("subject", ""), args.get("description", ""))
     except TaskError as exc:
-        return f"Error: {exc}"
+        return ToolResult.failure('PRECONDITION_FAILED', f"Error: {exc}", action='inspect', execution_status='unknown')
     blocked_by = args.get("blockedBy") or []
     if blocked_by:
         try:
@@ -425,11 +426,11 @@ def run_update_task(args: dict, ctx: ToolContext) -> str:
     task_id = args.get("task_id", "")
     add = args.get("addBlockedBy") or []
     if not isinstance(add, list) or not add:
-        return "Error: addBlockedBy must be a non-empty array of task IDs"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: addBlockedBy must be a non-empty array of task IDs", action='correct_arguments', execution_status='not_executed')
     try:
         task = store.update_dependencies(task_id, add)
     except TaskError as exc:
-        return f"Error: {exc}"
+        return ToolResult.failure('PRECONDITION_FAILED', f"Error: {exc}", action='inspect', execution_status='unknown')
     dependencies = ", ".join(task.blockedBy) or "(none)"
     return f"Updated {task.id} blockedBy: {dependencies}"
 
@@ -442,7 +443,7 @@ def run_get_task(args: dict, ctx: ToolContext) -> str:
     try:
         return _store(ctx).get_json(args.get("task_id", ""))
     except TaskError as exc:
-        return f"Error: {exc}"
+        return ToolResult.failure('PRECONDITION_FAILED', f"Error: {exc}", action='inspect', execution_status='unknown')
 
 
 def run_claim_task(args: dict, ctx: ToolContext) -> str:
@@ -452,7 +453,7 @@ def run_claim_task(args: dict, ctx: ToolContext) -> str:
             return claim(args.get("task_id", ""), ctx)
         return _store(ctx).claim(args.get("task_id", ""), owner=ctx.owner)
     except TaskError as exc:
-        return f"Error: {exc}"
+        return ToolResult.failure('PRECONDITION_FAILED', f"Error: {exc}", action='inspect', execution_status='unknown')
 
 
 def run_complete_task(args: dict, ctx: ToolContext) -> str:
@@ -462,7 +463,7 @@ def run_complete_task(args: dict, ctx: ToolContext) -> str:
             return complete(args.get("task_id", ""), ctx)
         return _store(ctx).complete(args.get("task_id", ""), owner=ctx.owner)
     except TaskError as exc:
-        return f"Error: {exc}"
+        return ToolResult.failure('PRECONDITION_FAILED', f"Error: {exc}", action='inspect', execution_status='unknown')
 
 
 _ID_SCHEMA = {"type": "string", "pattern": "^task_[0-9a-f]{8}$"}

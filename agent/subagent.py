@@ -25,6 +25,7 @@ from .events import Hooks
 from .llm import LLMClient
 from .loop import run_loop
 from .tools.registry import ToolContext, ToolRegistry
+from .tools.result import ToolResult
 
 SUBAGENT_SYSTEM_TEMPLATE = (
     "You are a coding agent at {workdir}. "
@@ -96,7 +97,7 @@ def run_subagent_loop(
     emit("done" if result.ok else f"stopped: {result.stop_reason}")
     if result.ok:
         return result.text or "(subagent produced no summary)"
-    return f"Subagent failed: {result.error}"
+    return ToolResult.failure('DELEGATION_FAILED', f"Subagent failed: {result.error}", action='inspect_state', execution_status='unknown')
 
 
 # --------------------------------------------------------------------------
@@ -129,11 +130,11 @@ TASK_DESCRIPTION = (
 def run_task(args: dict, ctx: ToolContext) -> str:
     prompt = args.get("prompt", "")
     if not isinstance(prompt, str) or not prompt.strip():
-        return "Error: prompt is required"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: prompt is required", action='correct_arguments', execution_status='not_executed')
 
     runtime = ctx.runtime
     if runtime is None or not hasattr(runtime, "spawn_subagent"):
-        return "Error: subagents are not available in this context"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: subagents are not available in this context", action='report', execution_status='not_executed')
 
     return runtime.spawn_subagent(prompt.strip(), ctx=ctx)
 

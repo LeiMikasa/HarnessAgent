@@ -26,6 +26,7 @@ from .tasks import TaskStore
 from .teams import TeamManager, Teammate
 from .todo import TodoList
 from .tools.registry import ToolContext, ToolRegistry
+from .tools.result import ToolResult
 
 
 @dataclass
@@ -52,7 +53,7 @@ class TeammateToolRuntime:
         return self.teammate.complete_task(task_id, ctx)
 
     def spawn_subagent(self, prompt: str, ctx: ToolContext | None = None) -> str:
-        return "Error: teammates cannot spawn subagents"
+        return ToolResult.failure('PERMISSION_DENIED', "Error: teammates cannot spawn subagents", action='report', execution_status='not_executed')
 
     def refresh_mcp_tools(self) -> None:
         return None
@@ -92,19 +93,19 @@ def _teammate(ctx: ToolContext) -> Teammate | None:
 def run_list_teammates(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     return manager.roster()
 
 
 def run_send_message(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
 
     to = str(args.get("to", "")).strip()
     content = str(args.get("content", ""))
     if not to or not content:
-        return "Error: 'to' and 'content' are required"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: 'to' and 'content' are required", action='correct_arguments', execution_status='not_executed')
 
     teammate = _teammate(ctx)
     if teammate is not None:
@@ -115,7 +116,7 @@ def run_send_message(args: dict, ctx: ToolContext) -> str:
         return f"Message sent to {to}"
 
     if to not in manager.teammates:
-        return f"Error: no teammate named {to!r}. Roster:\n{manager.roster()}"
+        return ToolResult.failure('NOT_FOUND', f"Error: no teammate named {to!r}. Roster:\n{manager.roster()}", action='inspect', execution_status='not_executed')
     manager.bus.send(manager.lead_name, to, content)
     return f"Message sent to {to}"
 
@@ -138,12 +139,12 @@ SEND_MESSAGE_SCHEMA = {
 def run_spawn_teammate(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     name = str(args.get("name", "")).strip()
     role = str(args.get("role", "")).strip() or "generalist"
     prompt = str(args.get("prompt", "")).strip()
     if not prompt:
-        return "Error: prompt is required; the teammate cannot see this conversation"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: prompt is required; the teammate cannot see this conversation", action='correct_arguments', execution_status='not_executed')
     autonomous = args.get("autonomous")
     return manager.spawn(
         name,
@@ -156,7 +157,7 @@ def run_spawn_teammate(args: dict, ctx: ToolContext) -> str:
 def run_request_plan(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     teammate = str(args.get("teammate", "")).strip()
     task = str(args.get("task", "")).strip()
     return manager.request_plan(teammate, task)
@@ -165,11 +166,11 @@ def run_request_plan(args: dict, ctx: ToolContext) -> str:
 def run_review_plan(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     request_id = str(args.get("request_id", "")).strip()
     approve = args.get("approve")
     if not isinstance(approve, bool):
-        return "Error: approve must be true or false"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: approve must be true or false", action='correct_arguments', execution_status='not_executed')
     feedback = str(args.get("feedback", ""))
     return manager.review_plan(request_id, approve, feedback)
 
@@ -177,14 +178,14 @@ def run_review_plan(args: dict, ctx: ToolContext) -> str:
 def run_pending_requests(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     return manager.pending_requests()
 
 
 def run_request_shutdown(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     teammate = str(args.get("teammate", "")).strip()
     reason = str(args.get("reason", ""))
     return manager.shutdown(teammate, reason)
@@ -193,28 +194,28 @@ def run_request_shutdown(args: dict, ctx: ToolContext) -> str:
 def run_create_worktree(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     name = str(args.get("name", "")).strip()
     task_id = str(args.get("task_id", "")).strip()
     if not name or not task_id:
-        return "Error: name and task_id are required"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: name and task_id are required", action='correct_arguments', execution_status='not_executed')
     return manager.worktrees.create(name, task_id)
 
 
 def run_remove_worktree(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     name = str(args.get("name", "")).strip()
     if not name:
-        return "Error: name is required"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: name is required", action='correct_arguments', execution_status='not_executed')
     return manager.worktrees.remove(name, discard_changes=bool(args.get("discard_changes")))
 
 
 def run_list_worktrees(args: dict, ctx: ToolContext) -> str:
     manager = _manager(ctx)
     if manager is None:
-        return "Error: teams are not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are not enabled for this session", action='report', execution_status='not_executed')
     entries = manager.worktrees.registered()
     assignments = manager.worktrees.active_assignments()
     lines = []
@@ -234,10 +235,10 @@ def run_list_worktrees(args: dict, ctx: ToolContext) -> str:
 def run_submit_plan(args: dict, ctx: ToolContext) -> str:
     teammate = _teammate(ctx)
     if teammate is None:
-        return "Error: submit_plan is only available to teammates"
+        return ToolResult.failure('PERMISSION_DENIED', "Error: submit_plan is only available to teammates", action='report', execution_status='not_executed')
     plan = str(args.get("plan", "")).strip()
     if not plan:
-        return "Error: plan is required"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: plan is required", action='correct_arguments', execution_status='not_executed')
     return teammate.submit_plan(plan)
 
 

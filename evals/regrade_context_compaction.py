@@ -15,6 +15,7 @@ from statistics import median
 from typing import Any
 
 from evals.context_compaction import verify_code_answer
+from evals.token_usage import aggregate_token_usage, token_comparison
 from evals.team_speed import verify as verify_dual
 from evals.verification_feedback import verify as verify_csv
 
@@ -69,6 +70,7 @@ def regrade(source: Path, destination: Path) -> None:
                     median(r["input_chars_sum"] for r in arm)
                     if all("input_chars_sum" in r for r in arm) else None
                 ),
+                **aggregate_token_usage(arm),
             }
     pairs = []
     for repeat in range(1, summary["repeats"] + 1):
@@ -83,6 +85,7 @@ def regrade(source: Path, destination: Path) -> None:
                     "compact_seconds": compact["elapsed_seconds"],
                     "full_input_chars": full["input_chars_sum"],
                     "compact_input_chars": compact["input_chars_sum"],
+                    **token_comparison(full, compact),
                 })
     corrected = dict(summary)
     corrected.update({
@@ -94,6 +97,10 @@ def regrade(source: Path, destination: Path) -> None:
         "aggregate": aggregate,
         "comparable_pairs": pairs,
         "results": results,
+        "token_totals_by_mode": {
+            mode: aggregate_token_usage([r for r in results if r["mode"] == mode])
+            for mode in ("full", "compact")
+        },
     })
     destination.write_text(
         json.dumps(corrected, ensure_ascii=False, indent=2), encoding="utf-8"

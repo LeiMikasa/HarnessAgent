@@ -36,6 +36,8 @@ from .context import COMPACT_FLAG, ContextCompactor, is_prompt_too_long
 from .events import POST_TOOL_USE, PRE_TOOL_USE, STOP, Hooks, StopDirective
 from .llm import LLMClient, extract_text, make_tool_result, tool_use_blocks
 from .tools.registry import ToolContext, ToolRegistry
+from .tools.result import ToolResult
+from .tools.recovery import ToolRecovery
 
 MAX_REACTIVE_RETRIES = 1
 MAX_INCOMPLETE_RETRIES = 2
@@ -59,7 +61,8 @@ def execute_tool(
     registry: ToolRegistry,# 工具池
     ctx: ToolContext, #本次调用的环境
     hooks: Hooks, # 钩子注册表
-) -> str:
+    recovery: ToolRecovery | None = None,
+) -> ToolResult:
     """PreToolUse -> handler -> PostToolUse.
 
     Every tool call in the system goes through here, which is why permission
@@ -67,15 +70,40 @@ def execute_tool(
     """
     # An approved path-escape is good for exactly one call.  Clearing it here
     # means an approval can never leak into the next tool call.
-    ctx.extra.pop("allow_outside", None) # 即便上一次工具调用被允许访问工作目录外的路径，该授权也只能使用一次
-    # 这样授权不会泄漏到后续任意工具调用，属于权限隔离。
-    blocked = hooks.trigger(PRE_TOOL_USE, block, ctx)
-    if blocked:
-        return str(blocked)
-
-    output = registry.dispatch(block.get("name", ""), block.get("input", {}), ctx)
-    hooks.trigger(POST_TOOL_USE, block, output, ctx)
-    return output
+    recovery = recovery if recovery is not None else ToolRecovery() #准备恢复管理器，取出工具名和参数
+    name, args = block.get("name", ""), block.get("input", {})
+    if not isinstance(name, str):
+        name = "<invalid-tool-name>"  # 如果模型传来的工具名不是字符串，就先替换成一个安全的占位名称，避免后续查询注册表时发生类型错误。
+    key = recovery.key(name, args, ctx) # 创建唯一key
+    ctx.extra.pop("allow_outside", None) # 清除旧的临时权限
+    # 实际上检查了两类情况 同一个工具，目标的修正次数已经耗尽或者这个文件上一次修改结果不确定，需要先检查状态
+    exhausted = recovery.exhausted(key) # 检查当前调用是否已经被恢复规则拦住
+    invalid = exhausted if exhausted is not None else registry.validate(name, args)
+    if invalid is not None:
+        recovery.record(name, args, invalid, phase="validation", attempt=0)
+        return recovery.observe(key, invalid)
+    for attempt in range(1, recovery.max_retries + 2):
+        # Re-check permission for EVERY attempt; never reuse an escape approval.
+        ctx.extra.pop("allow_outside", None)
+        blocked = hooks.trigger(PRE_TOOL_USE, block, ctx)
+        if blocked is not None:
+            output = blocked if isinstance(blocked, ToolResult) else ToolResult.failure(
+                "POLICY_BLOCKED", str(blocked))
+            recovery.record(name, args, output, phase="permission", attempt=0)
+            return output
+        started = time.monotonic()
+        try:
+            output = registry.dispatch(name, args, ctx)
+        finally:
+            ctx.extra.pop("allow_outside", None)
+        hooks.trigger(POST_TOOL_USE, block, output, ctx)
+        retry = recovery.can_retry(registry.get(name), output, attempt)
+        recovery.record(name, args, output, phase="execution", attempt=attempt,
+                        elapsed=time.monotonic() - started, retry=retry)
+        if not retry: # 不再重试有三种原因，已经成功  失败，但不适合自动重试  失败，而且重试次数已经用完
+            return recovery.observe(key, output)
+        recovery.wait(attempt)
+    raise AssertionError("tool retry budget was not enforced")
 
 
 def run_loop(
@@ -107,6 +135,8 @@ def run_loop(
     incomplete_retries = 0
     recovery_note = ""
     result = LoopResult() # 创建默认结果对象
+    recovery = ToolRecovery()
+    ctx.extra["tool_attempts"] = recovery.events
 
     def emit(text: str) -> None:
         if on_event and text:
@@ -259,12 +289,13 @@ def run_loop(
             label = "".join(char for char in str(name) if char.isprintable())[:80] or "(unnamed)"
             progress(f"[tool] {label}: running")
             started = time.monotonic()
-            output = execute_tool(block, registry, ctx, hook_registry)
+            output = execute_tool(block, registry, ctx, hook_registry, recovery)
             progress(f"[tool] {label}: returned in {time.monotonic() - started:.1f}s")
             result.tool_calls += 1
             preview_note = " (showing first 160 chars)" if len(output) > 160 else ""
             emit(f"{name}: [{len(output)} chars{preview_note}]\n{output[:160]}")
-            results.append(make_tool_result(block.get("id", ""), output))
+            results.append(make_tool_result(block.get("id", ""), output.model_content(),
+                                            is_error=not output.ok))
         messages.append({"role": "user", "content": results})
 
         # -- the model asked for room: compact now that the batch is safe ---

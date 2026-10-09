@@ -1,0 +1,459 @@
+{
+  "version": 1,
+  "name": "recall50",
+  "description": "50 synthetic conditions: 5 scenario families x 5 placements x 2 history sizes; 6 known facts and 1 unknown key per condition.",
+  "known_items_per_case": 6,
+  "unknown_items_per_case": 1,
+  "cases": [
+    {
+      "id": "facts-start-medium",
+      "family": "facts",
+      "placement": "start",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "facts-start-high",
+      "family": "facts",
+      "placement": "start",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "facts-early-medium",
+      "family": "facts",
+      "placement": "early",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "facts-early-high",
+      "family": "facts",
+      "placement": "early",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "facts-middle-medium",
+      "family": "facts",
+      "placement": "middle",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "facts-middle-high",
+      "family": "facts",
+      "placement": "middle",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "facts-late-medium",
+      "family": "facts",
+      "placement": "late",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "facts-late-high",
+      "family": "facts",
+      "placement": "late",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "facts-end-medium",
+      "family": "facts",
+      "placement": "end",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "facts-end-high",
+      "family": "facts",
+      "placement": "end",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "constraints-start-medium",
+      "family": "constraints",
+      "placement": "start",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "constraints-start-high",
+      "family": "constraints",
+      "placement": "start",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "constraints-early-medium",
+      "family": "constraints",
+      "placement": "early",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "constraints-early-high",
+      "family": "constraints",
+      "placement": "early",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "constraints-middle-medium",
+      "family": "constraints",
+      "placement": "middle",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "constraints-middle-high",
+      "family": "constraints",
+      "placement": "middle",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "constraints-late-medium",
+      "family": "constraints",
+      "placement": "late",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "constraints-late-high",
+      "family": "constraints",
+      "placement": "late",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "constraints-end-medium",
+      "family": "constraints",
+      "placement": "end",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "constraints-end-high",
+      "family": "constraints",
+      "placement": "end",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "revisions-start-medium",
+      "family": "revisions",
+      "placement": "start",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "revisions-start-high",
+      "family": "revisions",
+      "placement": "start",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "revisions-early-medium",
+      "family": "revisions",
+      "placement": "early",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "revisions-early-high",
+      "family": "revisions",
+      "placement": "early",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "revisions-middle-medium",
+      "family": "revisions",
+      "placement": "middle",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "revisions-middle-high",
+      "family": "revisions",
+      "placement": "middle",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "revisions-late-medium",
+      "family": "revisions",
+      "placement": "late",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "revisions-late-high",
+      "family": "revisions",
+      "placement": "late",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "revisions-end-medium",
+      "family": "revisions",
+      "placement": "end",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "revisions-end-high",
+      "family": "revisions",
+      "placement": "end",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "distractors-start-medium",
+      "family": "distractors",
+      "placement": "start",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "distractors-start-high",
+      "family": "distractors",
+      "placement": "start",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "distractors-early-medium",
+      "family": "distractors",
+      "placement": "early",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "distractors-early-high",
+      "family": "distractors",
+      "placement": "early",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "distractors-middle-medium",
+      "family": "distractors",
+      "placement": "middle",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "distractors-middle-high",
+      "family": "distractors",
+      "placement": "middle",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "distractors-late-medium",
+      "family": "distractors",
+      "placement": "late",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "distractors-late-high",
+      "family": "distractors",
+      "placement": "late",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "distractors-end-medium",
+      "family": "distractors",
+      "placement": "end",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "distractors-end-high",
+      "family": "distractors",
+      "placement": "end",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "summary-start-medium",
+      "family": "summary",
+      "placement": "start",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "summary-start-high",
+      "family": "summary",
+      "placement": "start",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "summary-early-medium",
+      "family": "summary",
+      "placement": "early",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "summary-early-high",
+      "family": "summary",
+      "placement": "early",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "summary-middle-medium",
+      "family": "summary",
+      "placement": "middle",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "summary-middle-high",
+      "family": "summary",
+      "placement": "middle",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "summary-late-medium",
+      "family": "summary",
+      "placement": "late",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "summary-late-high",
+      "family": "summary",
+      "placement": "late",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    },
+    {
+      "id": "summary-end-medium",
+      "family": "summary",
+      "placement": "end",
+      "pressure": "medium",
+      "history_pairs": 20,
+      "result_chars": 2200,
+      "ordinary_chars": 60000
+    },
+    {
+      "id": "summary-end-high",
+      "family": "summary",
+      "placement": "end",
+      "pressure": "high",
+      "history_pairs": 36,
+      "result_chars": 4000,
+      "ordinary_chars": 120000
+    }
+  ]
+}

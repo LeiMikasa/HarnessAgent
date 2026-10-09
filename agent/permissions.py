@@ -83,7 +83,9 @@ class Decision:
         return not self.allowed
 
     def as_tool_result(self) -> str:
-        return f"Permission denied: {self.reason}" if self.reason else "Permission denied."
+        from .tools.result import ToolResult
+        message = f"Permission denied: {self.reason}" if self.reason else "Permission denied."
+        return ToolResult.failure("PERMISSION_DENIED", message)
 
 
 ALLOWED = Decision(allowed=True)

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .tools.registry import Tool, ToolContext, ToolRegistry
+from .tools.result import ToolError, ToolResult, tool_error
 
 MAX_TOOL_NAME_CHARS = 64        # 工具名最长 64 个字符。
 MAX_MCP_OUTPUT_CHARS = 50_000   # MCP 工具输出最多 50000 字符，避免一次返回把上下文炸掉。
@@ -47,8 +48,12 @@ CALL_TIMEOUT_SECONDS = 60.0     # 调用超时 60 秒。
 DISALLOWED_CHARS = re.compile(r"[^a-zA-Z0-9_-]")  # 只允许字母、数字、下划线、连字符，其他字符会被替换。
 
 
-class MCPError(RuntimeError):
+class MCPError(ToolError, RuntimeError):
     """Raised for protocol, transport, or configuration failures."""
+
+    def __init__(self, message: str, *, code: str = "MCP_ERROR", transient: bool = False):
+        super().__init__(code, message, transient=transient,
+                         execution_status="unknown", action="inspect_state")
 
 
 def normalize_mcp_name(name: str) -> str:  # 把服务器名或工具名映射到模型工具名允许的字符集
@@ -110,11 +115,12 @@ class InProcessMCPClient(MCPClient):
     def call_tool(self, tool_name: str, args: dict) -> str:
         handler = self._handlers.get(tool_name)
         if handler is None:
-            return f"MCP error: unknown tool {tool_name!r}"
+            return tool_error("UNKNOWN_TOOL", f"MCP error: unknown tool {tool_name!r}", action="correct_arguments")
         try:
-            return str(handler(**args))
+            output = handler(**args)
+            return output if isinstance(output, ToolResult) else str(output)
         except Exception as exc:  # noqa: BLE001
-            return f"MCP error: {type(exc).__name__}: {exc}"
+            return ToolResult.from_exception(exc)
 
 
 class StdioMCPClient(MCPClient):
@@ -217,13 +223,13 @@ class StdioMCPClient(MCPClient):
     def _send(self, payload: dict) -> None:
         process = self._process
         if process is None or process.stdin is None:
-            raise MCPError(f"MCP server {self.name!r} is not running")
+            raise MCPError(f"MCP server {self.name!r} is not running", code="CONNECTION_ERROR", transient=True)
         with self._lock:
             try:
                 process.stdin.write(json.dumps(payload) + "\n")
                 process.stdin.flush()
             except (OSError, ValueError) as exc:
-                raise MCPError(f"MCP server {self.name!r} closed the pipe: {exc}") from exc
+                raise MCPError(f"MCP server {self.name!r} closed the pipe: {exc}", code="CONNECTION_ERROR", transient=True) from exc
 
     def _notify(self, method: str, params: dict) -> None:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
@@ -239,15 +245,15 @@ class StdioMCPClient(MCPClient):
             try:
                 message = self._responses.get(timeout=deadline)
             except queue.Empty:
-                raise MCPError(f"MCP server {self.name!r} timed out on {method}")
+                raise MCPError(f"MCP server {self.name!r} timed out on {method}", code="TIMEOUT", transient=True)
             if message.get("__eof__"):
-                raise MCPError(f"MCP server {self.name!r} exited during {method}")
+                raise MCPError(f"MCP server {self.name!r} exited during {method}", code="CONNECTION_ERROR", transient=True)
             if message.get("id") != request_id:
                 continue
             if "error" in message:
                 raise MCPError(f"MCP server {self.name!r} error on {method}: {message['error']}")
             return message.get("result") or {}
-        raise MCPError(f"MCP server {self.name!r} timed out on {method}")
+        raise MCPError(f"MCP server {self.name!r} timed out on {method}", code="TIMEOUT", transient=True)
 
     # -- protocol -----------------------------------------------------------
 
@@ -269,7 +275,7 @@ class StdioMCPClient(MCPClient):
                 "tools/call", {"name": tool_name, "arguments": args}, timeout=CALL_TIMEOUT_SECONDS
             )
         except MCPError as exc:
-            return f"MCP error: {exc}"
+            return ToolResult.from_exception(exc)
 
         parts: list[str] = []
         for block in result.get("content", []) or []:
@@ -281,7 +287,8 @@ class StdioMCPClient(MCPClient):
                 parts.append(json.dumps(block, ensure_ascii=False))
         output = "\n".join(part for part in parts if part).strip() or "(no output)"
         if result.get("isError"):
-            output = f"MCP tool error: {output}"
+            return tool_error("REMOTE_TOOL_ERROR", f"MCP tool error: {output[:MAX_MCP_OUTPUT_CHARS]}",
+                              action="inspect_state", execution_status="unknown")
         return output[:MAX_MCP_OUTPUT_CHARS]
 
 
@@ -312,9 +319,11 @@ class MCPManager:
         self,
         *,
         policy: dict[tuple[str, str], str] | None = None,
+        retry_safe_tools: Iterable[tuple[str, str]] = (),
         verbose: bool = False,
     ):
         self.policy = dict(DEFAULT_HOST_POLICY)
+        self.retry_safe_tools = set(retry_safe_tools)
         if policy:
             self.policy.update(policy)
         self.servers: dict[str, _Connected] = {}
@@ -331,7 +340,7 @@ class MCPManager:
             tools = client.list_tools()
         except Exception as exc:  # noqa: BLE001
             client.close()
-            return f"MCP error: could not list tools from {name!r}: {type(exc).__name__}: {exc}"
+            return ToolResult.failure("MCP_CONNECTION_FAILED", f"MCP error: could not list tools from {name!r}: {type(exc).__name__}: {exc}", execution_status="unknown")
         self.servers[name] = _Connected(client=client, tools=tools)
         self._note(f"connected {name!r} with {len(tools)} tool(s)")
         return f"Connected MCP server {name!r} ({len(tools)} tools)"
@@ -342,7 +351,7 @@ class MCPManager:
             client.start()
         except MCPError as exc:
             client.close()
-            return f"MCP error: {exc}"
+            return ToolResult.from_exception(exc)
         return self.connect(client)
 
     def disconnect(self, name: str) -> str:
@@ -411,6 +420,8 @@ class MCPManager:
                     input_schema=schema,
                     handler=_make_handler(client, raw_name),
                     source=f"mcp__{safe_server}",
+                    read_only=(server_name, raw_name) in self.retry_safe_tools,
+                    retry_safe=(server_name, raw_name) in self.retry_safe_tools,
                 )
                 policies[prefixed] = self.policy.get((server_name, raw_name), "confirm")
 
@@ -573,16 +584,16 @@ def _manager(ctx: ToolContext) -> MCPManager | None:
 def run_connect_mcp(args: dict, ctx: ToolContext) -> str:
     name = str(args.get("name", "")).strip()
     if not name:
-        return "Error: name is required"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: name is required", action='correct_arguments', execution_status='not_executed')
 
     manager = _manager(ctx)
     if manager is None:
-        return "Error: MCP is not enabled for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: MCP is not enabled for this session", action='report', execution_status='not_executed')
 
     factory = BUILTIN_SERVERS.get(name)
     if factory is None:
         available = ", ".join(sorted(BUILTIN_SERVERS)) or "none"
-        return f"Error: unknown MCP server {name!r}. Available: {available}"
+        return ToolResult.failure('NOT_FOUND', f"Error: unknown MCP server {name!r}. Available: {available}", action='inspect', execution_status='not_executed')
 
     result = manager.connect(factory())
 

@@ -15,12 +15,14 @@ permission pipeline explicitly approved an escape for this one call.
 from __future__ import annotations
 
 import glob as globlib
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 from .registry import ToolContext, ToolRegistry
+from .result import ToolError, ToolResult, tool_error
 
 # Caps.  These exist so one careless command cannot flood the context window.
 MAX_TOOL_OUTPUT = 50_000  # 任何工具输出最多5万字符，超出截断
@@ -31,8 +33,12 @@ GREP_MAX_FILE_BYTES = 2_000_000 # 跳过超2MB的文件
 GREP_LINE_LIMIT = 400 # 每行最多显示400字符
 
 
-class WorkspaceEscapeError(ValueError):
+class WorkspaceEscapeError(ToolError, ValueError):
     """Raised when a path argument points outside the workspace."""
+
+    def __init__(self, message: str, code: str = "PERMISSION_DENIED"):
+        super().__init__(code, message, field="path",
+                         action="correct_arguments" if code == "INVALID_ARGUMENT" else "report")
 
 # 唯一的收窄点
 def safe_path(ctx: ToolContext, raw: str) -> Path:
@@ -44,7 +50,7 @@ def safe_path(ctx: ToolContext, raw: str) -> Path:
     """
     root = Path(ctx.workdir).resolve()
     if not isinstance(raw, str) or not raw.strip():
-        raise WorkspaceEscapeError("path is required")
+        raise WorkspaceEscapeError("path is required", "INVALID_ARGUMENT")
 
     candidate = Path(raw).expanduser() # 绝对路径
     if not candidate.is_absolute(): # 是绝对路径吗
@@ -52,7 +58,7 @@ def safe_path(ctx: ToolContext, raw: str) -> Path:
     try:
         candidate = candidate.resolve()
     except (OSError, RuntimeError) as exc:
-        raise WorkspaceEscapeError(f"cannot resolve path {raw!r}: {exc}") from exc
+        raise WorkspaceEscapeError(f"cannot resolve path {raw!r}: {exc}", "INVALID_ARGUMENT") from exc
 
     if candidate != root and not candidate.is_relative_to(root):
         if not ctx.extra.get("allow_outside"):
@@ -74,7 +80,7 @@ def _clip(text: str, limit: int = MAX_TOOL_OUTPUT) -> str:
 def run_bash(args: dict, ctx: ToolContext) -> str:
     command = args.get("command", "")
     if not isinstance(command, str) or not command.strip():
-        return "Error: command is required"
+        return tool_error("INVALID_ARGUMENT", "command is required", field="command", action="correct_arguments")
 
     timeout = args.get("timeout")
     timeout = BASH_TIMEOUT_SECONDS if not isinstance(timeout, (int, float)) else float(timeout)
@@ -90,14 +96,17 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return f"Error: Timeout ({timeout:g}s)"
+        return tool_error("TIMEOUT", f"Timeout ({timeout:g}s); command may have produced side effects. "
+                          "Inspect the actual state before issuing another command.",
+                          action="inspect_state", execution_status="unknown")
     except (FileNotFoundError, OSError) as exc:
-        return f"Error: {type(exc).__name__}: {exc}"
+        return ToolResult.from_exception(exc)
 
     output = (result.stdout + result.stderr).strip()
     output = _clip(output) if output else "(no output)"
     if result.returncode:
-        return f"Error: command exited with status {result.returncode}\n{output}"
+        return tool_error("COMMAND_FAILED", f"command exited with status {result.returncode}\n{output}",
+                          action="inspect_state", execution_status="unknown")
     return output
 
 
@@ -108,15 +117,20 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
 
 def run_read_file(args: dict, ctx: ToolContext) -> str:
     path = safe_path(ctx, args.get("path", ""))
-    if not path.exists():
-        return f"Error: no such file: {args.get('path')}"
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return tool_error("NOT_FOUND", f"no such file: {args.get('path')}", action="inspect",
+                          inspected_path=os.path.normcase(str(path)))
+    except OSError as exc:
+        return ToolResult.from_exception(exc, read_only=True)
     if path.is_dir():
-        return f"Error: {args.get('path')} is a directory; use glob"
+        return tool_error("PRECONDITION_FAILED", f"{args.get('path')} is a directory; use glob", action="inspect")
 
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        return f"Error: {type(exc).__name__}: {exc}"
+        return ToolResult.from_exception(exc, read_only=True)
 
     offset = args.get("offset")
     limit = args.get("limit")
@@ -136,7 +150,9 @@ def run_read_file(args: dict, ctx: ToolContext) -> str:
         notes.append(f"{len(lines) - end} more lines")
     if notes:
         body += "\n... (" + "; ".join(notes) + ")"
-    return _clip(body) if body else "(empty file)"
+    # Only a complete, untruncated read is evidence for resolving uncertain writes.
+    inspected = os.path.normcase(str(path)) if start == 0 and end == len(lines) and len(body) <= MAX_TOOL_OUTPUT else None
+    return ToolResult(_clip(body) if body else "(empty file)", inspected_path=inspected)
 
 
 # --------------------------------------------------------------------------
@@ -148,12 +164,12 @@ def run_write_file(args: dict, ctx: ToolContext) -> str:
     path = safe_path(ctx, args.get("path", ""))
     content = args.get("content", "")
     if not isinstance(content, str):
-        return "Error: content must be a string"
+        return tool_error("INVALID_ARGUMENT", "content must be a string", field="content", action="correct_arguments")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     except OSError as exc:
-        return f"Error: {type(exc).__name__}: {exc}"
+        return ToolResult.from_exception(exc)
     return f"Wrote {len(content)} bytes to {args.get('path')}"
 
 
@@ -168,33 +184,33 @@ def run_edit_file(args: dict, ctx: ToolContext) -> str:
     new_text = args.get("new_text")
 
     if not isinstance(old_text, str) or not old_text:
-        return "Error: old_text is required"
+        return tool_error("INVALID_ARGUMENT", "old_text is required", field="old_text", action="correct_arguments")
     if not isinstance(new_text, str):
-        return "Error: new_text is required"
+        return tool_error("INVALID_ARGUMENT", "new_text is required", field="new_text", action="correct_arguments")
     if not path.is_file():
-        return f"Error: no such file: {args.get('path')}"
+        return tool_error("NOT_FOUND", f"no such file: {args.get('path')}", action="inspect")
 
     try:
         content = path.read_text(encoding="utf-8")
     except OSError as exc:
-        return f"Error: {type(exc).__name__}: {exc}"
+        return ToolResult.from_exception(exc, read_only=True)
 
     count = content.count(old_text)
     replace_all = bool(args.get("replace_all"))
 
     if count == 0:
-        return f"Error: old_text not found in {args.get('path')}"
+        return tool_error("PRECONDITION_FAILED", f"old_text not found in {args.get('path')}; "
+                          "read_file first, then use the actual unique text.", action="inspect")
     if count > 1 and not replace_all:
-        return (
-            f"Error: old_text appears {count} times in {args.get('path')}; "
-            "add more surrounding context to make it unique, or pass replace_all"
-        )
+        return tool_error("PRECONDITION_FAILED", f"old_text appears {count} times in {args.get('path')}; "
+                          "read_file and add more surrounding context to make it unique, or pass replace_all",
+                          action="inspect")
 
     updated = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
     try:
         path.write_text(updated, encoding="utf-8")
     except OSError as exc:
-        return f"Error: {type(exc).__name__}: {exc}"
+        return ToolResult.from_exception(exc)
 
     replaced = count if replace_all else 1
     return f"Edited {args.get('path')} ({replaced} replacement{'s' if replaced != 1 else ''})"
@@ -208,13 +224,13 @@ def run_edit_file(args: dict, ctx: ToolContext) -> str:
 def run_glob(args: dict, ctx: ToolContext) -> str:
     pattern = args.get("pattern", "")
     if not isinstance(pattern, str) or not pattern.strip():
-        return "Error: pattern is required"
+        return tool_error("INVALID_ARGUMENT", "pattern is required", field="pattern", action="correct_arguments")
 
     root = Path(ctx.workdir).resolve()
     try:
         raw_matches = globlib.glob(pattern, root_dir=str(root), recursive=True)
     except (re.error, OSError, ValueError) as exc:
-        return f"Error: {type(exc).__name__}: {exc}"
+        return ToolResult.from_exception(exc, read_only=True)
 
     matches: set[str] = set()
     for match in raw_matches:
@@ -253,18 +269,18 @@ def _iter_files(root: Path, include: str | None) -> list[Path]:
 def run_grep(args: dict, ctx: ToolContext) -> str:
     pattern = args.get("pattern", "")
     if not isinstance(pattern, str) or not pattern:
-        return "Error: pattern is required"
+        return tool_error("INVALID_ARGUMENT", "pattern is required", field="pattern", action="correct_arguments")
     try:
         regex = re.compile(pattern)
     except re.error as exc:
-        return f"Error: invalid regex: {exc}"
+        return tool_error("INVALID_ARGUMENT", f"invalid regex: {exc}", field="pattern", action="correct_arguments")
 
     include = args.get("include")
     include = include if isinstance(include, str) and include.strip() else None
     path_arg = args.get("path")
     root = safe_path(ctx, path_arg) if path_arg else Path(ctx.workdir).resolve()
     if not root.exists():
-        return f"Error: no such path: {path_arg}"
+        return tool_error("NOT_FOUND", f"no such path: {path_arg}", action="inspect")
     # 如果root指向文件直接搜他，如果不是去迭代
     files = [root] if root.is_file() else _iter_files(root, include)
     results: list[str] = []
@@ -309,8 +325,8 @@ def run_grep(args: dict, ctx: ToolContext) -> str:
 _BASH_SCHEMA = {
     "type": "object",
     "properties": {
-        "command": {"type": "string", "description": "Shell command to run."},
-        "timeout": {"type": "number", "description": "Seconds before the command is killed."},
+        "command": {"type": "string", "minLength": 1, "description": "Shell command to run."},
+        "timeout": {"type": "number", "exclusiveMinimum": 0, "description": "Seconds before the command is killed."},
     },
     "required": ["command"],
 }
@@ -318,9 +334,9 @@ _BASH_SCHEMA = {
 _READ_SCHEMA = {
     "type": "object",
     "properties": {
-        "path": {"type": "string", "description": "File path, relative to the workspace."},
-        "offset": {"type": "integer", "description": "First line to read (1-based)."},
-        "limit": {"type": "integer", "description": "Maximum number of lines."},
+        "path": {"type": "string", "minLength": 1, "description": "File path, relative to the workspace."},
+        "offset": {"type": "integer", "minimum": 1, "description": "First line to read (1-based)."},
+        "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines."},
     },
     "required": ["path"],
 }
@@ -328,7 +344,7 @@ _READ_SCHEMA = {
 _WRITE_SCHEMA = {
     "type": "object",
     "properties": {
-        "path": {"type": "string"},
+        "path": {"type": "string", "minLength": 1},
         "content": {"type": "string"},
     },
     "required": ["path", "content"],
@@ -337,8 +353,8 @@ _WRITE_SCHEMA = {
 _EDIT_SCHEMA = {
     "type": "object",
     "properties": {
-        "path": {"type": "string"},
-        "old_text": {"type": "string", "description": "Exact text to replace; must be unique."},
+        "path": {"type": "string", "minLength": 1},
+        "old_text": {"type": "string", "minLength": 1, "description": "Exact text to replace; must be unique."},
         "new_text": {"type": "string", "description": "Replacement text."},
         "replace_all": {"type": "boolean", "description": "Replace every occurrence."},
     },
@@ -347,14 +363,14 @@ _EDIT_SCHEMA = {
 
 _GLOB_SCHEMA = {
     "type": "object",
-    "properties": {"pattern": {"type": "string", "description": "Glob pattern; ** is recursive."}},
+    "properties": {"pattern": {"type": "string", "minLength": 1, "description": "Glob pattern; ** is recursive."}},
     "required": ["pattern"],
 }
 
 _GREP_SCHEMA = {
     "type": "object",
     "properties": {
-        "pattern": {"type": "string", "description": "Python regular expression."},
+        "pattern": {"type": "string", "minLength": 1, "description": "Python regular expression."},
         "include": {"type": "string", "description": "Glob filter, e.g. '**/*.py'."},
         "path": {"type": "string", "description": "File or directory to search."},
     },
@@ -364,12 +380,14 @@ _GREP_SCHEMA = {
 
 def register_basic_tools(registry: ToolRegistry) -> ToolRegistry:
     """Add the six base tools to `registry`."""
+    for schema in (_BASH_SCHEMA, _READ_SCHEMA, _WRITE_SCHEMA, _EDIT_SCHEMA, _GLOB_SCHEMA, _GREP_SCHEMA):
+        schema["additionalProperties"] = False
     registry.add("bash", "Run a shell command in the workspace.", _BASH_SCHEMA, run_bash)
-    registry.add("read_file", "Read a file's contents.", _READ_SCHEMA, run_read_file, read_only=True)
+    registry.add("read_file", "Read a file's contents.", _READ_SCHEMA, run_read_file, read_only=True, retry_safe=True)
     registry.add("write_file", "Create or overwrite a file.", _WRITE_SCHEMA, run_write_file)
     registry.add("edit_file", "Replace exact text in a file.", _EDIT_SCHEMA, run_edit_file)
-    registry.add("glob", "Find files by glob pattern.", _GLOB_SCHEMA, run_glob, read_only=True)
-    registry.add("grep", "Search file contents with a regular expression.", _GREP_SCHEMA, run_grep, read_only=True)
+    registry.add("glob", "Find files by glob pattern.", _GLOB_SCHEMA, run_glob, read_only=True, retry_safe=True)
+    registry.add("grep", "Search file contents with a regular expression.", _GREP_SCHEMA, run_grep, read_only=True, retry_safe=True)
     return registry
 
 

@@ -38,6 +38,7 @@ class LLMResponse:
 
     content: list[dict] = field(default_factory=list)
     stop_reason: str | None = None
+    usage: dict[str, Any] | None = None
 
     def text(self) -> str:
         return extract_text(self.content)
@@ -90,9 +91,22 @@ def normalize_block(raw: Any) -> dict:
     return {"type": "text", "text": str(raw)}
 
 # 规范响应
+def normalize_usage(raw: Any) -> dict[str, Any] | None:
+    """Keep provider usage, including cache/reasoning details; absent is unknown."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return copy.deepcopy(raw)
+    dump = getattr(raw, "model_dump", None)
+    if callable(dump):
+        data = dump(exclude_none=True)
+        return copy.deepcopy(data) if isinstance(data, dict) else None
+    return None
+
+
 def normalize_response(raw: Any) -> LLMResponse:
     """Convert a provider response into an `LLMResponse`."""
-    content = getattr(raw, "content", raw)
+    content = raw.get("content", []) if isinstance(raw, dict) else getattr(raw, "content", raw)
     blocks: list[dict] = []
     if isinstance(content, str):
         blocks = [{"type": "text", "text": content}]
@@ -104,7 +118,9 @@ def normalize_response(raw: Any) -> LLMResponse:
             if item.get("type") == "thinking" and not item.get("thinking"):
                 continue
             blocks.append(item)
-    return LLMResponse(content=blocks, stop_reason=getattr(raw, "stop_reason", None))
+    stop_reason = raw.get("stop_reason") if isinstance(raw, dict) else getattr(raw, "stop_reason", None)
+    usage = raw.get("usage") if isinstance(raw, dict) else getattr(raw, "usage", None)
+    return LLMResponse(content=blocks, stop_reason=stop_reason, usage=normalize_usage(usage))
 
 
 def block_type(block: Any) -> str | None:

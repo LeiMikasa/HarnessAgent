@@ -40,6 +40,8 @@ process -- the design here -- the lock is sufficient.
 
 from __future__ import annotations
 
+from .tools.result import ToolResult
+
 import json
 import os
 import re
@@ -444,11 +446,11 @@ class WorktreeManager:
     # 真正创建worktree
     def create(self, name: str, task_id: str) -> str:
         if not self.enabled:
-            return "Error: worktrees are disabled for this session"
+            return ToolResult.failure('TOOL_UNAVAILABLE', "Error: worktrees are disabled for this session", action='report', execution_status='not_executed')
         try:
             name = validate_worktree_name(name)
         except TeamError as exc:
-            return f"Error: {exc}"
+            return ToolResult.failure('PRECONDITION_FAILED', f"Error: {exc}", action='inspect', execution_status='not_executed')
 
         if not self.is_git_repo():
             return (
@@ -460,12 +462,12 @@ class WorktreeManager:
         if self.is_registered(name):
             return f"Worktree {name!r} already exists at {path}"
         if path.exists():
-            return f"Error: {path} already exists but is not a registered worktree"
+            return ToolResult.failure('PRECONDITION_FAILED', f"Error: {path} already exists but is not a registered worktree", action='inspect', execution_status='not_executed')
 
         branch = self._branch(name)
         ok, output = self._run_git(["worktree", "add", "-b", branch, str(path), "HEAD"])
         if not ok:
-            return f"Error: git worktree add failed: {output}"
+            return ToolResult.failure('TOOL_ERROR', f"Error: git worktree add failed: {output}", action='inspect_state', execution_status='unknown')
         self.bind(task_id, name)
         return f"Created worktree {name!r} at {path} (branch {branch})"
     # 移除worktree
@@ -474,7 +476,7 @@ class WorktreeManager:
         try:
             name = validate_worktree_name(name)
         except TeamError as exc:
-            return f"Error: {exc}"
+            return ToolResult.failure('PRECONDITION_FAILED', f"Error: {exc}", action='inspect', execution_status='not_executed')
 
         with self._lock:
             bound = [a for a in self.assignments.values() if a.worktree == name]
@@ -505,7 +507,7 @@ class WorktreeManager:
 
         ok, output = self._run_git(["worktree", "remove", "--force", str(self._path(name))])
         if not ok:
-            return f"Error: git worktree remove failed: {output}"
+            return ToolResult.failure('TOOL_ERROR', f"Error: git worktree remove failed: {output}", action='inspect_state', execution_status='unknown')
         # The wt/<name> branch is deliberately retained, so work can be reviewed.
         for task in self.bound_tasks(name):
             self.bind(task.id, None)
@@ -748,7 +750,7 @@ class Teammate:
                 # directory. A newly claimed task can be retried after repair.
                 if result.startswith("Claimed"):
                     self.tasks.release(task.id, owner=self.name)
-                return f"Error: could not enter task worktree: {exc}"
+                return ToolResult.failure('TOOL_ERROR', f"Error: could not enter task worktree: {exc}", action='inspect_state', execution_status='unknown')
             self.state.claimed_task = task.id
             self.state.status = "working"
             self.todos.clear()
@@ -1093,19 +1095,19 @@ class TeamManager:
         require_plan: bool | None = None,
     ) -> str:
         if not self.enabled:
-            return "Error: teams are disabled for this session"
+            return ToolResult.failure('TOOL_UNAVAILABLE', "Error: teams are disabled for this session", action='report', execution_status='not_executed')
         if not is_valid_agent_name(name):
             return (
                 f"Error: invalid teammate name {name!r}. Use letters, digits, dot, "
                 "underscore, or hyphen, starting with a letter or digit."
             )
         if name.casefold() in RESERVED_AGENT_NAMES:
-            return f"Error: {name!r} is reserved by the runtime"
+            return ToolResult.failure('PRECONDITION_FAILED', f"Error: {name!r} is reserved by the runtime", action='inspect', execution_status='not_executed')
 
         with self._lock:
             existing = self.teammates.get(name)
             if existing is not None and existing.alive:
-                return f"Error: teammate {name!r} is already running"
+                return ToolResult.failure('PRECONDITION_FAILED', f"Error: teammate {name!r} is already running", action='inspect', execution_status='not_executed')
 
             # Arm the gate *before* the thread starts, so the very first tool
             # call already sees the right answer.  An absent gate entry would
@@ -1164,7 +1166,7 @@ class TeamManager:
     def shutdown(self, name: str, reason: str = "") -> str:
         teammate = self.teammates.get(name)
         if teammate is None:
-            return f"Error: no teammate named {name!r}"
+            return ToolResult.failure('NOT_FOUND', f"Error: no teammate named {name!r}", action='inspect', execution_status='not_executed')
         request = self.protocol.create("shutdown", name)
         self.bus.send(
             self.lead_name,
@@ -1193,7 +1195,7 @@ class TeamManager:
         inbox.  Only the name has to be valid.
         """
         if not is_valid_agent_name(name):
-            return f"Error: invalid teammate name {name!r}"
+            return ToolResult.failure('PRECONDITION_FAILED', f"Error: invalid teammate name {name!r}", action='inspect', execution_status='not_executed')
         request = self.protocol.create("plan", name, task_id=task or None)
         self.bus.send(
             self.lead_name,
@@ -1207,11 +1209,11 @@ class TeamManager:
     def review_plan(self, request_id: str, approve: bool, feedback: str = "") -> str:
         request = self.protocol.pending.get(request_id)
         if request is None:
-            return f"Error: unknown request {request_id!r}"
+            return ToolResult.failure('NOT_FOUND', f"Error: unknown request {request_id!r}", action='inspect', execution_status='not_executed')
         if request.kind != "plan":
-            return f"Error: {request_id!r} is not a plan request"
+            return ToolResult.failure('PRECONDITION_FAILED', f"Error: {request_id!r} is not a plan request", action='inspect', execution_status='not_executed')
         if request.resolved:
-            return f"Error: request {request_id!r} was already resolved"
+            return ToolResult.failure('PRECONDITION_FAILED', f"Error: request {request_id!r} was already resolved", action='inspect', execution_status='not_executed')
 
         self.protocol.resolve(request, approve, feedback)
         self.bus.send(

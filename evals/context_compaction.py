@@ -26,6 +26,7 @@ from agent.config import load_settings
 from agent.llm import LLMClient, LLMResponse, build_client, tool_use_blocks
 from agent.permissions import DENY
 from agent.runtime import Runtime
+from evals.token_usage import aggregate_token_usage, summarize_calls, token_comparison
 from evals.verification_feedback import FIXTURE, MOCK_REPAIRED, TASK_PROMPT, verify
 from evals.team_speed import (
     FIXTURE as DUAL_FIXTURE,
@@ -205,6 +206,7 @@ class MeasuredLLM:
     tool_calls: int = 0
     context_errors: int = 0
     input_chars: list[int] = field(default_factory=list)
+    usage_by_call: list[dict[str, Any]] = field(default_factory=list)
     tool_definition_sha256: str | None = None
     model_seconds: float = 0.0
 
@@ -226,6 +228,12 @@ class MeasuredLLM:
         ) + json.dumps(kwargs["tools"], ensure_ascii=False, default=str))
         self.input_chars.append(len(payload))
         self.calls += 1
+        usage_record = {
+            "call": self.calls,
+            "kind": "agent" if kwargs["tools"] else "summary",
+            "usage": None,
+        }
+        self.usage_by_call.append(usage_record)
         if not kwargs["tools"]:
             self.summary_calls += 1
         started = time.perf_counter()
@@ -241,6 +249,7 @@ class MeasuredLLM:
         finally:
             self.model_seconds += time.perf_counter() - started
         self.tool_calls += len(tool_use_blocks(response.content))
+        usage_record["usage"] = response.usage
         return response
 
 
@@ -352,6 +361,8 @@ def run_worker(
         result["input_chars_sum"] = sum(llm.input_chars)
         result["input_chars_max"] = max(llm.input_chars, default=0)
         result["input_chars_by_call"] = llm.input_chars
+        result["usage_by_call"] = llm.usage_by_call
+        result.update(summarize_calls(llm.usage_by_call))
         result["tool_definition_sha256"] = llm.tool_definition_sha256
         result["model_seconds_sum"] = round(llm.model_seconds, 3)
         result["success"] = result["status"] == "success"
@@ -434,6 +445,7 @@ def run_parent(args: argparse.Namespace) -> int:
                 "median_input_chars_sum": median(r["input_chars_sum"] for r in arm
                                           if "input_chars_sum" in r)
                 if all("input_chars_sum" in r for r in arm) else None,
+                **aggregate_token_usage(arm),
             }
     pairs = []
     for repeat in range(1, args.repeats + 1):
@@ -454,7 +466,12 @@ def run_parent(args: argparse.Namespace) -> int:
                     "compact_seconds": compact["elapsed_seconds"],
                     "full_input_chars": full["input_chars_sum"],
                     "compact_input_chars": compact["input_chars_sum"],
+                    **token_comparison(full, compact),
                 })
+    token_totals_by_mode = {
+        mode: aggregate_token_usage([r for r in results if r["mode"] == mode])
+        for mode in modes
+    }
     summary = {
         "cases": cases, "provider": args.provider,
         "model": args.model or settings.model, "repeats": args.repeats,
@@ -464,9 +481,16 @@ def run_parent(args: argparse.Namespace) -> int:
         "measurement_note": (
             "Input characters include system, message, and tool-definition JSON; "
             "they are not tokens or cost."
+            " Token totals use provider-reported usage, including summary calls; "
+            "missing or incomplete fields are null. Cache counts remain separate; "
+            "no cost or inclusive-input estimate is inferred."
             + (" Mock validates plumbing only." if args.provider == "mock" else "")
         ),
         "aggregate": aggregate, "comparable_pairs": pairs, "results": results,
+        "token_totals_by_mode": token_totals_by_mode,
+        "token_comparison": token_comparison(
+            token_totals_by_mode["full"], token_totals_by_mode["compact"]
+        ) if "full" in modes and "compact" in modes else None,
     }
     path = batch / "summary.json"
     path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

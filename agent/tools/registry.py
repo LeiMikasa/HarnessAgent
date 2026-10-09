@@ -22,7 +22,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+import json
+from jsonschema import validators
+from referencing import Registry
+from referencing.exceptions import NoSuchResource
+
 from ..config import Settings
+from .result import ToolResult, tool_error
+
+
+def _reject_reference(uri: str):
+    # Validation may resolve local $defs, but must never fetch a remote schema.
+    raise NoSuchResource(ref=uri)
 
 
 @dataclass
@@ -64,6 +75,7 @@ class Tool:  # 工具类
     handler: ToolHandler
     source: str = "builtin"        # "builtin" or "mcp__<server>"
     read_only: bool = False  # 是否只读，可用于权限控制，并发调度
+    retry_safe: bool = False  # Host opt-in; read_only alone never enables retries.
 
     def definition(self) -> dict:
         """The shape the model API expects."""
@@ -97,6 +109,7 @@ class ToolRegistry:# 工具注册表
         *,
         source: str = "builtin",
         read_only: bool = False,
+        retry_safe: bool = False,
     ) -> Tool:
         return self.register(
             Tool(
@@ -106,6 +119,7 @@ class ToolRegistry:# 工具注册表
                 handler=handler,
                 source=source,
                 read_only=read_only,
+                retry_safe=retry_safe,
             )
         )
 
@@ -159,19 +173,57 @@ class ToolRegistry:# 工具注册表
     def __iter__(self) -> Iterator[Tool]:
         return iter(self._tools.values())
 
-    # -- execution ----------------------------------------------------------
+    # -- execution  执行工具之前，校验大模型传来的参数----------------------------------------------------------
     # 执行相关 ； 运行工具并返回文本输出
-    def dispatch(self, name: str, args: dict | None, ctx: ToolContext) -> str:
-        """Run one tool and return its output as text.
-
-        Never raises: a broken tool becomes an error string for the model to
-        read, which is what lets the loop keep going instead of dying.
-        """
+    def validate(self, name: str, args: Any) -> ToolResult | None:
+        """Validate before permissions/side effects, without coercing model input."""
+        if not isinstance(name, str):
+            return tool_error("INVALID_ARGUMENT", "tool name must be a string", field="name", action="correct_arguments")
         tool = self._tools.get(name)
         if tool is None:
             available = ", ".join(self._tools) or "none"
-            return f"Unknown tool: {name}. Available: {available}"
+            return tool_error("UNKNOWN_TOOL", f"Unknown tool: {name}. Available: {available}",
+                              action="correct_arguments")
+        if not isinstance(args, dict):
+            return tool_error("INVALID_ARGUMENT", "tool input must be a JSON object",
+                              field="<root>", action="correct_arguments")
+        def string_keys(value):
+            if isinstance(value, dict):
+                return all(isinstance(key, str) and string_keys(item) for key, item in value.items())
+            if isinstance(value, (list, tuple)):
+                return all(string_keys(item) for item in value)
+            return True
+        if not string_keys(args):
+            return tool_error("INVALID_ARGUMENT", "JSON object keys must be strings", action="correct_arguments")
         try:
-            return str(tool.handler(dict(args or {}), ctx))
+            json.dumps(args, allow_nan=False)
+        except (ValueError, TypeError):
+            return tool_error("INVALID_ARGUMENT", "arguments must contain finite JSON values",
+                              action="correct_arguments")
+        try:
+            validator_type = validators.validator_for(tool.input_schema)
+            validator_type.check_schema(tool.input_schema)
+            validator = validator_type(tool.input_schema, registry=Registry(retrieve=_reject_reference))
+            error = next(validator.iter_errors(args), None)
+        except Exception as exc:  # malformed/unresolvable host or MCP schema
+            return tool_error("INVALID_SCHEMA", f"Cannot validate tool schema: {type(exc).__name__}: {exc}")
+        if error is None:
+            return None
+        path = list(error.absolute_path)
+        if error.validator == "required":
+            path += [next(key for key in error.validator_value if key not in error.instance)]
+        return tool_error("INVALID_ARGUMENT", error.message,
+                          field="/".join(map(str, path)) or "<root>", action="correct_arguments")
+
+    def dispatch(self, name: str, args: dict | None, ctx: ToolContext) -> ToolResult:
+        """One validated attempt. Recovery and permission hooks live in the loop."""
+        arguments = {} if args is None else args
+        invalid = self.validate(name, arguments)
+        if invalid is not None:
+            return invalid
+        tool = self._tools[name]
+        try:
+            output = tool.handler(dict(arguments), ctx)
+            return output if isinstance(output, ToolResult) else ToolResult(str(output))
         except Exception as exc:  # noqa: BLE001 - surface every failure to the model
-            return f"Error: {type(exc).__name__}: {exc}"
+            return ToolResult.from_exception(exc, read_only=tool.read_only)

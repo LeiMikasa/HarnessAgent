@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover
     yaml = None
 
 from .tools.registry import ToolContext, ToolRegistry
+from .tools.result import ToolResult
 
 MANIFEST_NAME = "SKILL.md"
 MAX_SKILL_CHARS = 60_000
@@ -188,7 +189,7 @@ class SkillLoader:
         skill = self.get(name)
         if skill is None:
             available = ", ".join(self.skills) or "none"
-            return f"Error: unknown skill {name!r}. Available: {available}"
+            return ToolResult.failure('NOT_FOUND', f"Error: unknown skill {name!r}. Available: {available}", action='inspect', execution_status='not_executed')
         content = skill.content
         if len(content) > MAX_SKILL_CHARS:
             content = content[:MAX_SKILL_CHARS] + "\n... (skill truncated)"
@@ -203,10 +204,10 @@ class SkillLoader:
 def run_load_skill(args: dict, ctx: ToolContext) -> str:
     name = args.get("name", "")
     if not isinstance(name, str) or not name.strip():
-        return "Error: name is required"
+        return ToolResult.failure('INVALID_ARGUMENT', "Error: name is required", action='correct_arguments', execution_status='not_executed')
     loader = _loader(ctx)
     if loader is None:
-        return "Error: no skill loader is configured for this session"
+        return ToolResult.failure('TOOL_UNAVAILABLE', "Error: no skill loader is configured for this session", action='report', execution_status='not_executed')
     return loader.load(name.strip())
 
 

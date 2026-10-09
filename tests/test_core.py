@@ -97,7 +97,10 @@ class LoopTests(HarnessCase):
         runtime.submit("write")
 
         self.assertFalse((self.tmp / "x.txt").exists())
-        self.assertEqual(self.tool_result_texts(runtime)[0], "blocked by test")
+        import json
+        error = json.loads(self.tool_result_texts(runtime)[0])
+        self.assertEqual(error["message"], "blocked by test")
+        self.assertEqual(error["error_code"], "POLICY_BLOCKED")
 
     def test_stop_hook_can_force_another_turn(self):
         runtime = self.make_runtime(script=["first answer", "second answer"])
