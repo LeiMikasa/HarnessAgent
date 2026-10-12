@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from anthropic.types import Usage
 from common import HarnessCase
+from agent.context import ContextCompactor
 from agent.llm import LLMResponse, normalize_response
 from evals.context_compaction import FixtureMockLLM, MeasuredLLM, run_worker
 from evals.export_context_compaction import export
@@ -85,7 +86,10 @@ class TokenUsageTests(HarnessCase):
                 return response
 
         results = []
-        with patch("evals.context_compaction.FixtureMockLLM", UsageMock):
+        # This test verifies summary usage export with a fixed 90k history,
+        # independently of the larger production compaction threshold.
+        with patch("evals.context_compaction.FixtureMockLLM", UsageMock), \
+                patch.object(ContextCompactor, "CONTEXT_CHAR_LIMIT", 80_000):
             for mode in ("full", "compact"):
                 run_dir = self.tmp / mode
                 run_dir.mkdir()

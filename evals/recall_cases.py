@@ -1,6 +1,6 @@
 """Deterministic inputs for 50 paired context-recall cases.
 
-Five synthetic scenario families x five placements x two history sizes.
+Five synthetic scenario families x five placements x two pressure ranges.
 These are 50 conditions, not 50 unrelated real-world coding tasks.
 """
 
@@ -8,32 +8,48 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 from pathlib import Path
 from typing import Any
 
 from evals.context_compaction import diagnostic_output
 
 DATASET = Path(__file__).parent / "datasets" / "recall50.json"
+DATASET_VERSION = 2
+DATASET_SEED = 20261011
 FAMILIES = ("facts", "constraints", "revisions", "distractors", "summary")
 PLACEMENTS = ("start", "early", "middle", "late", "end")
 
 
 def build_specs() -> list[dict[str, Any]]:
-    return [
-        {"id": f"{family}-{placement}-{pressure}", "family": family,
-         "placement": placement, "pressure": pressure,
-         "history_pairs": 20 if pressure == "medium" else 36,
-         "result_chars": 2200 if pressure == "medium" else 4000,
-         "ordinary_chars": 60000 if pressure == "medium" else 120000}
-        for family in FAMILIES for placement in PLACEMENTS
-        for pressure in ("medium", "high")
-    ]
+    """Fixed per-case seeds vary history sizes without changing paired inputs."""
+    specs = []
+    for family in FAMILIES:
+        for placement in PLACEMENTS:
+            for pressure in ("medium", "high"):
+                case_id = f"{family}-{placement}-{pressure}"
+                seed = hashlib.sha256(f"{DATASET_SEED}:{case_id}".encode()).digest()
+                rng = random.Random(int.from_bytes(seed, "big"))
+                if pressure == "medium":
+                    pairs = rng.randint(24, 48)
+                    result_chars = rng.randint(2600, 4200)
+                    ordinary_chars = rng.randint(90_000, 185_000)
+                else:
+                    pairs = rng.randint(40, 72)
+                    result_chars = rng.randint(3800, 6000)
+                    ordinary_chars = rng.randint(145_000, 260_000)
+                specs.append({"id": case_id, "family": family,
+                              "placement": placement, "pressure": pressure,
+                              "history_pairs": pairs, "result_chars": result_chars,
+                              "ordinary_chars": ordinary_chars})
+    return specs
 
 
 def load_specs(path: Path = DATASET) -> list[dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("version") != 1 or data.get("cases") != build_specs():
-        raise ValueError("Dataset must match the reviewed recall50 version-1 cases")
+    if (data.get("version") != DATASET_VERSION or data.get("seed") != DATASET_SEED
+            or data.get("cases") != build_specs()):
+        raise ValueError(f"Dataset must match recall50 version {DATASET_VERSION}, seed {DATASET_SEED}")
     return data["cases"]
 
 
@@ -80,7 +96,11 @@ def materialize(spec: dict[str, Any]) -> dict[str, Any]:
         "Write ONLY a JSON object to answer.json containing exactly these keys: "
         + json.dumps([*expected, *absent_keys])
         + ". The expected values are not repeated here. Use file tools if needed to "
-        "inspect archived context. Do not edit any other file. Finish with a concise answer."
+        "inspect archived context. Historical tool-use paths describe past reads; "
+        "the original diagnostics files are not present in this workspace. Retrieve "
+        "their recorded outputs from the visible conversation or archives referenced "
+        "by compaction markers. "
+        "Do not edit any other file. Finish with a concise answer."
     )
     count = spec["history_pairs"]
     anchor = placement_index(spec["placement"], count)

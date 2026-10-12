@@ -9,8 +9,10 @@ from collections import Counter
 from unittest.mock import patch
 
 from common import HarnessCase
+from agent.context import ContextCompactor
+from agent.llm import LLMResponse
 from evals.recall_cases import build_specs, grade_answer, load_specs, materialize
-from evals.recall50 import SuiteMockLLM, aggregate, run_parent, run_worker, summarize
+from evals.recall50 import SuiteMockLLM, aggregate, run_parent, run_worker, summarize, write_report
 
 
 class Recall50Tests(HarnessCase):
@@ -31,6 +33,32 @@ class Recall50Tests(HarnessCase):
         self.assertEqual(sum(len(c["expected"]) for c in cases), 300)
         self.assertEqual(sum(len(c["absent_keys"]) for c in cases), 50)
         self.assertEqual(materialize(specs[0]), cases[0])
+
+    def test_random_history_sizes_are_reproducible_and_mix_pressure(self):
+        specs = load_specs()
+        self.assertEqual(build_specs(), build_specs())
+        for pressure in ("medium", "high"):
+            group = [s for s in specs if s["pressure"] == pressure]
+            self.assertGreater(len({s["history_pairs"] for s in group}), 1)
+            self.assertGreater(len({s["result_chars"] for s in group}), 1)
+            self.assertGreater(len({s["ordinary_chars"] for s in group}), 1)
+        char_triggers = message_triggers = 0
+        summary_triggers = []
+        for spec in specs:
+            case = materialize(spec)
+            messages = [*case["history"], {"role": "user", "content": case["prompt"]}]
+            over_chars = ContextCompactor.estimate_chars(messages) > ContextCompactor.CONTEXT_CHAR_LIMIT
+            over_messages = len(messages) > ContextCompactor.SNIP_MAX_MESSAGES
+            char_triggers += over_chars
+            message_triggers += over_messages
+            if spec["family"] == "summary":
+                summary_triggers.append(over_chars)
+        self.assertGreater(char_triggers, 0)
+        self.assertLess(char_triggers, len(specs))
+        self.assertGreater(message_triggers, 0)
+        self.assertLess(message_triggers, len(specs))
+        self.assertIn(True, summary_triggers)
+        self.assertIn(False, summary_triggers)
 
     def test_gold_matches_latest_approved_history_without_question_leakage(self):
         for spec in load_specs():
@@ -99,7 +127,9 @@ class Recall50Tests(HarnessCase):
 
     def test_mock_paired_histories_tools_and_grader_are_isolated(self):
         records = []
-        spec = next(s for s in load_specs() if s["family"] == "summary" and s["placement"] == "middle")
+        spec = next(s for s in load_specs() if s["family"] == "summary" and s["placement"] == "middle"
+                    and s["pressure"] == "high")
+        spec = {**spec, "ordinary_chars": ContextCompactor.CONTEXT_CHAR_LIMIT + 40_000}
         for mode in ("full", "compact"):
             path = self.tmp / mode
             path.mkdir()
@@ -150,6 +180,36 @@ class Recall50Tests(HarnessCase):
         self.assertEqual(result["correct_items"], 0)
         self.assertFalse(result["success"])
         self.assertEqual(result["stop_reason"], "max_turns")
+        self.assertEqual(result["answer_state"], "valid")
+        total = aggregate([result])
+        self.assertEqual(total["completion_rate"], 0)
+        self.assertEqual(total["micro_recall"], 0)
+        self.assertEqual(total["artifact_recall"], 1)
+        self.assertEqual(total["gradable_answer_runs"], 1)
+
+    def test_missing_answer_does_not_claim_zero_archive_retention(self):
+        spec = load_specs()[0]
+        run_dir = self.tmp / "no-answer"
+        run_dir.mkdir()
+        with patch.object(SuiteMockLLM, "create", return_value=LLMResponse(
+                [{"type": "text", "text": "No answer written."}], "end_turn")):
+            result = run_worker(spec, "full", run_dir, "mock", "mock-1", 12, 4000)
+        self.assertEqual(result["answer_state"], "missing")
+        self.assertTrue(result["answer_finished"])
+        self.assertEqual(result["status"], "verification_failed")
+        result["repeat"] = 1
+        summary = summarize([result], {"provider": "mock", "model": "mock-1",
+                            "case_ids": [spec["id"]], "repeats": 1, "modes": ["full"]})
+        total = summary["totals"]["full"]
+        self.assertEqual(total["micro_recall"], 0)
+        self.assertEqual(total["completion_rate"], 1)
+        self.assertEqual(total["gradable_answer_runs"], 0)
+        self.assertIsNone(total["artifact_recall"])
+        write_report(run_dir, summary)
+        report = (run_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("未知", report)
+        self.assertIn("missing", report)
+        self.assertIn("不能解释成压缩归档的信息保留率", report)
 
     def test_report_aggregates_known_usage_including_summary_calls(self):
         per_call_input = 100
@@ -161,7 +221,9 @@ class Recall50Tests(HarnessCase):
                                   "cache_creation_input_tokens": 0, "cache_read_input_tokens": 3}
                 return response
 
-        spec = next(s for s in load_specs() if s["family"] == "summary" and s["placement"] == "middle")
+        spec = next(s for s in load_specs() if s["family"] == "summary" and s["placement"] == "middle"
+                    and s["pressure"] == "high")
+        spec = {**spec, "ordinary_chars": ContextCompactor.CONTEXT_CHAR_LIMIT + 40_000}
         records = []
         with patch("evals.recall50.SuiteMockLLM", UsageMock):
             for mode in ("full", "compact"):
@@ -195,4 +257,6 @@ class Recall50Tests(HarnessCase):
             self.assertEqual(summary["totals"][mode]["micro_recall"], 0)
             self.assertEqual(summary["totals"][mode]["expected_items"], 6)
             self.assertIsNone(summary["totals"][mode]["token_totals"]["input_tokens"])
+            self.assertEqual(summary["totals"][mode]["completion_rate"], 0)
+            self.assertIsNone(summary["totals"][mode]["artifact_recall"])
         self.assertIsNone(summary["token_comparison_all_runs"]["token_reduction_percent"]["input_tokens"])

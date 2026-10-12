@@ -107,7 +107,7 @@ def initial_history(
 
 
 def summarization_history(release_code: str, position: str = "start") -> list[dict]:
-    """Long ordinary text forces model summarization after cheaper stages fail."""
+    """Long ordinary text; summary triggering depends on the active thresholds."""
     noise = diagnostic_output(900, 90_000)
     marker = f"Historical release note: RELEASE_CODE={release_code}\n"
     offset = {"start": 0, "middle": len(noise) // 2, "end": len(noise)}[position]

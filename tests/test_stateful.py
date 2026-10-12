@@ -206,13 +206,33 @@ class TaskStoreTests(HarnessCase):
 class CompactionTests(HarnessCase):
     def compactor(self, script=None, enabled=True) -> ContextCompactor:
         llm = MockLLM(script=script or [])
-        return ContextCompactor(
+        compactor = ContextCompactor(
             llm,
             "mock-1",
             self.tmp / ".agent" / "transcripts",
             self.tmp / ".agent" / "tool-results",
             enabled=enabled,
         )
+        # Exercise boundary repair with small fixtures independent of production defaults.
+        compactor.SNIP_MAX_MESSAGES = 50
+        compactor.SNIP_KEEP_MESSAGES = 50
+        return compactor
+
+    def test_default_snip_leaves_headroom_for_new_turns(self):
+        compactor = self.compactor()
+        compactor.SNIP_MAX_MESSAGES = ContextCompactor.SNIP_MAX_MESSAGES
+        compactor.SNIP_KEEP_MESSAGES = ContextCompactor.SNIP_KEEP_MESSAGES
+        messages = [{"role": "user", "content": f"m{i}"}
+                    for i in range(compactor.SNIP_MAX_MESSAGES + 1)]
+        once = compactor.prepare(messages, "request")
+        self.assertEqual(len(once), compactor.SNIP_KEEP_MESSAGES)
+        self.assertEqual(len(list(compactor.transcript_dir.glob("*.jsonl"))), 1)
+        for index in range((compactor.SNIP_MAX_MESSAGES - compactor.SNIP_KEEP_MESSAGES) // 2):
+            once.extend([{"role": "assistant", "content": "thinking"},
+                         {"role": "user", "content": f"new{index}"}])
+            once = compactor.prepare(once, "request")
+        self.assertEqual(len(list(compactor.transcript_dir.glob("*.jsonl"))), 1)
+        self.assertLessEqual(len(once), compactor.SNIP_MAX_MESSAGES)
 
     def test_small_results_are_left_alone(self):
         compactor = self.compactor()
@@ -329,9 +349,9 @@ class CompactionTests(HarnessCase):
 
     def test_micro_compact_protects_unseen_and_recent(self):
         compactor = self.compactor()
-        long_text = "L" * 500
+        long_text = "L" * (compactor.MICRO_COMPACT_MIN_CHARS + 500)
         messages: list[dict] = [{"role": "user", "content": "start"}]
-        for index in range(6):
+        for index in range(compactor.KEEP_RECENT_RESULTS + 3):
             messages.append({"role": "assistant", "content": [tool_use(f"t{index}")]})
             messages.append({"role": "user", "content": [tool_result(f"t{index}", long_text)]})
         messages.append({"role": "assistant", "content": "thinking"})
@@ -352,7 +372,62 @@ class CompactionTests(HarnessCase):
         intact = [body for body in bodies if body == long_text]
         self.assertEqual(len(replaced), 3, "the three oldest consumed results")
         self.assertEqual(bodies[-1], long_text, "the unread result must survive")
-        self.assertEqual(len(intact), 4, "newest three consumed + the fresh one")
+        self.assertEqual(len(intact), compactor.KEEP_RECENT_RESULTS + 1,
+                         "recent consumed results and the fresh one must survive")
+
+    def test_micro_compact_does_not_recount_existing_pointer(self):
+        compactor = self.compactor()
+        compactor.MICRO_COMPACT_MIN_CHARS = 1
+        saved = compactor.save_output("old", "original evidence")
+        pointer = f"[Earlier tool result saved at {saved}]"
+        messages = [{"role": "user", "content": [tool_result("old", pointer)]}]
+        for index in range(compactor.KEEP_RECENT_RESULTS):
+            messages.append({"role": "user", "content": [tool_result(f"recent{index}", "small")]})
+        messages.append({"role": "assistant", "content": "continue"})
+
+        compactor.micro_compact(messages, target_chars=0)
+        compactor.micro_compact(messages, target_chars=0)
+
+        self.assertEqual(messages[0]["content"][0]["content"], pointer)
+        self.assertEqual(saved.read_text(encoding="utf-8"), "original evidence")
+        self.assertEqual(compactor.notes, [])
+
+    def test_prepare_keeps_search_evidence_in_moderate_context(self):
+        compactor = self.compactor()
+        evidence = "confirmed api_port=8081\n" + "context " * 800
+        messages = [{"role": "assistant", "content": [tool_use("search")]},
+                    {"role": "user", "content": [tool_result("search", evidence)]}]
+        for index in range(12):
+            messages.extend([
+                {"role": "assistant", "content": [tool_use(f"read{index}")]},
+                {"role": "user", "content": [tool_result(f"read{index}", "noise " * 1600)]},
+            ])
+        messages.append({"role": "assistant", "content": "continue"})
+        self.assertGreater(compactor.estimate_chars(messages), 80_000)
+        self.assertLess(compactor.estimate_chars(messages), compactor.CONTEXT_CHAR_LIMIT)
+
+        result = compactor.prepare(messages, "finish the task")
+
+        self.assertEqual(result[1]["content"][0]["content"], evidence)
+        self.assertEqual(compactor.notes, [])
+
+    def test_prepare_preserves_later_evidence_in_fresh_large_result_preview(self):
+        compactor = self.compactor()
+        evidence = "confirmed api_port=8081"
+        output = "noise " * 500 + evidence + " tail" * 40_000
+        messages = [{"role": "user", "content": "inspect"},
+                    {"role": "assistant", "content": [tool_use("fresh")]},
+                    {"role": "user", "content": [tool_result("fresh", output)]}]
+
+        result = compactor.prepare(messages, "finish the task")
+
+        preview = result[-1]["content"][0]["content"]
+        self.assertIn(evidence, preview)
+        self.assertIn("<persisted-output>", preview)
+        saved = compactor.persisted_output_path(preview)
+        self.assertEqual(Path(saved).read_text(encoding="utf-8"), output)
+        self.assertLessEqual(compactor.estimate_chars(result), compactor.CONTEXT_CHAR_LIMIT)
+        self.assertFalse(any("summary" in note for note in compactor.notes))
 
     def test_fit_tool_results_touches_unseen_results(self):
         compactor = self.compactor()

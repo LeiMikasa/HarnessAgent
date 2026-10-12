@@ -250,6 +250,42 @@ class BasicToolTests(HarnessCase):
         self.assertIn("line7", output)
         self.assertNotIn("line8", output)
 
+    def test_grep_keeps_a_match_deep_inside_a_long_line_visible(self):
+        note = "PROJECT_NOTE " + json.dumps({"project": "atlas", "key": "description",
+                                             "value": "v" * 500, "revision": 2, "approved": True})
+        self.write("archive.jsonl", "x" * 2000 + note + "y" * 2000)
+        runtime = self.make_runtime()
+        output = runtime.execute_tool({"name": "grep", "input": {"pattern": "PROJECT_NOTE", "path": "archive.jsonl"}})
+        self.assertIn("archive.jsonl:1:", output)
+        self.assertIn(note, output)
+        self.assertLessEqual(len(output.split(":", 2)[2]), 1000)
+        self.assertIn("...", output)
+
+    def test_grep_returns_more_hits_and_only_reports_actual_truncation(self):
+        self.write("hits.txt", "\n".join(f"needle {index}" for index in range(500)))
+        runtime = self.make_runtime()
+        block = {"name": "grep", "input": {"pattern": "needle", "path": "hits.txt"}}
+        output = runtime.execute_tool(block)
+        self.assertEqual(len(output.splitlines()), 500)
+        self.assertIn("hits.txt:500:needle 499", output)
+        self.assertNotIn("results limited", output)
+        self.write("hits.txt", "\n".join(f"needle {index}" for index in range(501)))
+        output = runtime.execute_tool(block)
+        self.assertEqual(sum(line.startswith("hits.txt:") for line in output.splitlines()), 500)
+        self.assertIn("results limited", output)
+        self.assertNotIn("hits.txt:501:", output)
+
+    def test_grep_enforces_total_output_budget_before_the_hit_limit(self):
+        self.write("wide.txt", "\n".join("needle " + "x" * 1500 for _ in range(600)))
+        runtime = self.make_runtime()
+        output = runtime.execute_tool({"name": "grep", "input": {"pattern": "needle", "path": "wide.txt"}})
+        hits = [line for line in output.splitlines() if line.startswith("wide.txt:")]
+        self.assertGreater(len(hits), 0)
+        self.assertLess(len(hits), 500)
+        self.assertLessEqual(len(output), 50000)
+        self.assertIn("results limited", output)
+        self.assertTrue(all("needle" in line for line in hits))
+
     def test_bash_reports_nonzero_exit(self):
         runtime = self.make_runtime(
             script=[{"tool": "bash", "input": {"command": "exit 3"}}, "noted"]

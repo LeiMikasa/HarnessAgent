@@ -1,7 +1,7 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "recall50",
-  "description": "50 synthetic conditions: 5 scenario families x 5 placements x 2 history sizes; 6 known facts and 1 unknown key per condition.",
+  "description": "50 synthetic conditions: 5 families x 5 placements x 2 pressure ranges; fixed per-case random history sizes; 6 known facts and 1 unknown key per condition.",
   "known_items_per_case": 6,
   "unknown_items_per_case": 1,
   "cases": [
@@ -10,450 +10,451 @@
       "family": "facts",
       "placement": "start",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 39,
+      "result_chars": 4188,
+      "ordinary_chars": 93625
     },
     {
       "id": "facts-start-high",
       "family": "facts",
       "placement": "start",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 54,
+      "result_chars": 4444,
+      "ordinary_chars": 218493
     },
     {
       "id": "facts-early-medium",
       "family": "facts",
       "placement": "early",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 45,
+      "result_chars": 2659,
+      "ordinary_chars": 95568
     },
     {
       "id": "facts-early-high",
       "family": "facts",
       "placement": "early",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 50,
+      "result_chars": 4056,
+      "ordinary_chars": 187621
     },
     {
       "id": "facts-middle-medium",
       "family": "facts",
       "placement": "middle",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 30,
+      "result_chars": 3470,
+      "ordinary_chars": 102136
     },
     {
       "id": "facts-middle-high",
       "family": "facts",
       "placement": "middle",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 59,
+      "result_chars": 5407,
+      "ordinary_chars": 169775
     },
     {
       "id": "facts-late-medium",
       "family": "facts",
       "placement": "late",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 34,
+      "result_chars": 3589,
+      "ordinary_chars": 174089
     },
     {
       "id": "facts-late-high",
       "family": "facts",
       "placement": "late",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 63,
+      "result_chars": 5390,
+      "ordinary_chars": 219449
     },
     {
       "id": "facts-end-medium",
       "family": "facts",
       "placement": "end",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 36,
+      "result_chars": 4075,
+      "ordinary_chars": 162561
     },
     {
       "id": "facts-end-high",
       "family": "facts",
       "placement": "end",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 62,
+      "result_chars": 5984,
+      "ordinary_chars": 163516
     },
     {
       "id": "constraints-start-medium",
       "family": "constraints",
       "placement": "start",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 25,
+      "result_chars": 3444,
+      "ordinary_chars": 137254
     },
     {
       "id": "constraints-start-high",
       "family": "constraints",
       "placement": "start",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 65,
+      "result_chars": 4252,
+      "ordinary_chars": 169169
     },
     {
       "id": "constraints-early-medium",
       "family": "constraints",
       "placement": "early",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 42,
+      "result_chars": 3578,
+      "ordinary_chars": 94767
     },
     {
       "id": "constraints-early-high",
       "family": "constraints",
       "placement": "early",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 54,
+      "result_chars": 4627,
+      "ordinary_chars": 188804
     },
     {
       "id": "constraints-middle-medium",
       "family": "constraints",
       "placement": "middle",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 29,
+      "result_chars": 4156,
+      "ordinary_chars": 171913
     },
     {
       "id": "constraints-middle-high",
       "family": "constraints",
       "placement": "middle",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 63,
+      "result_chars": 4035,
+      "ordinary_chars": 197665
     },
     {
       "id": "constraints-late-medium",
       "family": "constraints",
       "placement": "late",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 30,
+      "result_chars": 2918,
+      "ordinary_chars": 124085
     },
     {
       "id": "constraints-late-high",
       "family": "constraints",
       "placement": "late",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 63,
+      "result_chars": 3928,
+      "ordinary_chars": 170542
     },
     {
       "id": "constraints-end-medium",
       "family": "constraints",
       "placement": "end",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 24,
+      "result_chars": 3865,
+      "ordinary_chars": 130702
     },
     {
       "id": "constraints-end-high",
       "family": "constraints",
       "placement": "end",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 57,
+      "result_chars": 5700,
+      "ordinary_chars": 213338
     },
     {
       "id": "revisions-start-medium",
       "family": "revisions",
       "placement": "start",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 35,
+      "result_chars": 3519,
+      "ordinary_chars": 96073
     },
     {
       "id": "revisions-start-high",
       "family": "revisions",
       "placement": "start",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 47,
+      "result_chars": 5450,
+      "ordinary_chars": 157726
     },
     {
       "id": "revisions-early-medium",
       "family": "revisions",
       "placement": "early",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 30,
+      "result_chars": 3334,
+      "ordinary_chars": 178036
     },
     {
       "id": "revisions-early-high",
       "family": "revisions",
       "placement": "early",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 51,
+      "result_chars": 4919,
+      "ordinary_chars": 255058
     },
     {
       "id": "revisions-middle-medium",
       "family": "revisions",
       "placement": "middle",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 25,
+      "result_chars": 3871,
+      "ordinary_chars": 163559
     },
     {
       "id": "revisions-middle-high",
       "family": "revisions",
       "placement": "middle",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 54,
+      "result_chars": 4498,
+      "ordinary_chars": 243362
     },
     {
       "id": "revisions-late-medium",
       "family": "revisions",
       "placement": "late",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 29,
+      "result_chars": 3967,
+      "ordinary_chars": 143512
     },
     {
       "id": "revisions-late-high",
       "family": "revisions",
       "placement": "late",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 69,
+      "result_chars": 4668,
+      "ordinary_chars": 213098
     },
     {
       "id": "revisions-end-medium",
       "family": "revisions",
       "placement": "end",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 24,
+      "result_chars": 3392,
+      "ordinary_chars": 175905
     },
     {
       "id": "revisions-end-high",
       "family": "revisions",
       "placement": "end",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 59,
+      "result_chars": 5014,
+      "ordinary_chars": 253895
     },
     {
       "id": "distractors-start-medium",
       "family": "distractors",
       "placement": "start",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 33,
+      "result_chars": 3983,
+      "ordinary_chars": 90192
     },
     {
       "id": "distractors-start-high",
       "family": "distractors",
       "placement": "start",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 55,
+      "result_chars": 4474,
+      "ordinary_chars": 231663
     },
     {
       "id": "distractors-early-medium",
       "family": "distractors",
       "placement": "early",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 45,
+      "result_chars": 3964,
+      "ordinary_chars": 95217
     },
     {
       "id": "distractors-early-high",
       "family": "distractors",
       "placement": "early",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 53,
+      "result_chars": 5287,
+      "ordinary_chars": 240116
     },
     {
       "id": "distractors-middle-medium",
       "family": "distractors",
       "placement": "middle",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 48,
+      "result_chars": 3602,
+      "ordinary_chars": 106102
     },
     {
       "id": "distractors-middle-high",
       "family": "distractors",
       "placement": "middle",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 44,
+      "result_chars": 5512,
+      "ordinary_chars": 236802
     },
     {
       "id": "distractors-late-medium",
       "family": "distractors",
       "placement": "late",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 24,
+      "result_chars": 2689,
+      "ordinary_chars": 110076
     },
     {
       "id": "distractors-late-high",
       "family": "distractors",
       "placement": "late",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 63,
+      "result_chars": 5414,
+      "ordinary_chars": 159021
     },
     {
       "id": "distractors-end-medium",
       "family": "distractors",
       "placement": "end",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 33,
+      "result_chars": 3100,
+      "ordinary_chars": 154269
     },
     {
       "id": "distractors-end-high",
       "family": "distractors",
       "placement": "end",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 58,
+      "result_chars": 5307,
+      "ordinary_chars": 219520
     },
     {
       "id": "summary-start-medium",
       "family": "summary",
       "placement": "start",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 46,
+      "result_chars": 2679,
+      "ordinary_chars": 95901
     },
     {
       "id": "summary-start-high",
       "family": "summary",
       "placement": "start",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 68,
+      "result_chars": 3818,
+      "ordinary_chars": 198819
     },
     {
       "id": "summary-early-medium",
       "family": "summary",
       "placement": "early",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 39,
+      "result_chars": 2937,
+      "ordinary_chars": 92007
     },
     {
       "id": "summary-early-high",
       "family": "summary",
       "placement": "early",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 48,
+      "result_chars": 4675,
+      "ordinary_chars": 194757
     },
     {
       "id": "summary-middle-medium",
       "family": "summary",
       "placement": "middle",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 33,
+      "result_chars": 3677,
+      "ordinary_chars": 178122
     },
     {
       "id": "summary-middle-high",
       "family": "summary",
       "placement": "middle",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 48,
+      "result_chars": 5380,
+      "ordinary_chars": 222050
     },
     {
       "id": "summary-late-medium",
       "family": "summary",
       "placement": "late",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 38,
+      "result_chars": 2969,
+      "ordinary_chars": 141926
     },
     {
       "id": "summary-late-high",
       "family": "summary",
       "placement": "late",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 60,
+      "result_chars": 5620,
+      "ordinary_chars": 169043
     },
     {
       "id": "summary-end-medium",
       "family": "summary",
       "placement": "end",
       "pressure": "medium",
-      "history_pairs": 20,
-      "result_chars": 2200,
-      "ordinary_chars": 60000
+      "history_pairs": 30,
+      "result_chars": 3919,
+      "ordinary_chars": 175592
     },
     {
       "id": "summary-end-high",
       "family": "summary",
       "placement": "end",
       "pressure": "high",
-      "history_pairs": 36,
-      "result_chars": 4000,
-      "ordinary_chars": 120000
+      "history_pairs": 62,
+      "result_chars": 4177,
+      "ordinary_chars": 204854
     }
-  ]
+  ],
+  "seed": 20261011
 }

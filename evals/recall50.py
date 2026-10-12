@@ -21,11 +21,12 @@ from statistics import median
 from typing import Any
 
 from agent.config import load_settings
+from agent.context import ContextCompactor
 from agent.llm import LLMResponse, build_client
 from agent.permissions import DENY
 from agent.runtime import Runtime
 from evals.context_compaction import ALLOWED_TOOLS, MeasuredLLM
-from evals.recall_cases import FAMILIES, grade_answer, load_specs, materialize
+from evals.recall_cases import DATASET_SEED, DATASET_VERSION, FAMILIES, grade_answer, load_specs, materialize
 from evals.token_usage import TOKEN_FIELDS, aggregate_token_usage, summarize_calls, token_comparison
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -131,6 +132,8 @@ def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
         loop = runtime.run_turn()
         grading = grade_answer(workspace, case)
         result["grading"] = grading
+        result["answer_state"] = ("missing" if not (workspace / "answer.json").exists()
+                                  else "invalid" if grading["format_error"] else "valid")
         result["stop_reason"] = loop.stop_reason
         result["answer_finished"] = loop.ok
         result["agent_error"] = loop.error
@@ -142,6 +145,7 @@ def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
         result["archive_files"] = len(list(settings.transcripts_dir.glob("*.jsonl")))
         result["tool_result_files"] = len(list((settings.state_dir / "tool-results").glob("*")))
         result["compaction_triggered"] = bool(result["archive_files"] or result["tool_result_files"] or llm.summary_calls)
+        result["compaction_notes"] = list(runtime.compactor.notes)
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"[:500]
     finally:
@@ -164,8 +168,20 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
     abstention_targets = sum(r["abstention_targets"] for r in records)
     abstentions = sum(r["correct_abstentions"] for r in records)
     successes = sum(r["success"] for r in records)
+    finished = sum(r.get("answer_finished", r["success"]) for r in records)
+    # Conditional artifact grading is diagnostic, never a replacement for task recall.
+    graded = [r for r in records if r.get("grading") and not r["grading"]["format_error"]]
+    artifact_expected = sum(r["expected_items"] for r in graded)
+    artifact_correct = sum(r["grading"]["correct_items"] for r in graded)
     return {
         "trials": len(records), "passed_cases": successes,
+        "finished_runs": finished,
+        "completion_rate": finished / len(records) if records else None,
+        "gradable_answer_runs": len(graded),
+        "artifact_expected_items": artifact_expected,
+        "artifact_correct_items": artifact_correct,
+        "artifact_recall": artifact_correct / artifact_expected if artifact_expected else None,
+        "stop_reasons": dict(Counter(r.get("stop_reason", r["status"]) for r in records)),
         "case_pass_rate": successes / len(records) if records else None,
         "expected_items": expected, "correct_items": correct,
         "micro_recall": correct / expected if expected else None,
@@ -175,6 +191,7 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         "failures_by_status": dict(Counter(r["status"] for r in records if not r["success"])),
         "model_calls_reported": sum(r.get("model_calls", 0) for r in records),
         "summary_calls_reported": sum(r.get("summary_calls", 0) for r in records),
+        "tool_calls_reported": sum(r.get("tool_calls", 0) for r in records),
         "compaction_triggered_runs": sum(r.get("compaction_triggered", False) for r in records),
         "median_elapsed_seconds": median(r["elapsed_seconds"] for r in records) if records else None,
         **aggregate_token_usage(records),
@@ -206,7 +223,9 @@ def summarize(records: list[dict[str, Any]], config: dict[str, Any]) -> dict[str
         "config": config, "completed_runs": len(records),
         "planned_runs": len(config["case_ids"]) * config["repeats"] * len(modes),
         "is_model_quality_result": config["provider"] != "mock",
-        "measurement_note": "Synthetic configuration-recall conditions. Failures remain in denominators. "
+        "measurement_note": "Synthetic end-to-end history-retrieval conditions, not isolated compression retention. "
+        "Failures remain in task-recall denominators. Artifact recall is conditional on a gradable answer, "
+        "can include unfinished runs, and cannot show what was retained in archives. "
         "Provider usage only, including summary calls; missing counts are null. Cache fields are separate. "
         "Mock uses scripted gold output and has no real token measurements. A single batch does not establish generalization.",
         "totals": totals,
@@ -234,13 +253,33 @@ def write_report(batch: Path, summary: dict[str, Any]) -> None:
              f"已记录 {summary['completed_runs']}/{summary['planned_runs']} 次 Agent 运行。", "",
              "Mock 仅验证流程；脚本化答案的分数不能用于简历或模型效果结论。" if not summary["is_model_quality_result"] else
              "本批为合成历史上的一次对照观察，不是通用 Agent 基准。", "",
-             "准确召回率按正确恢复的信息项 / 全部目标信息项计算，保持 JSON 类型；未完成、超时和无法解析的输出按零项召回计入分母。",
+             "任务召回率按正常结束后提交的正确项 / 全部目标项计算，保持 JSON 类型；未完成、超时和无法解析的输出按零项召回计入分母。",
+             "这是历史检索任务的最终成绩，不能解释成压缩归档的信息保留率。",
              "整例通过要求六项全部正确、缺失值正确返回 null、格式正确且 Agent 正常结束。", "",
-             "| 模式 | 准确召回 | 召回率 | 整例通过 | 正确拒答 | 模型调用（已记录） |",
+             "| 模式 | 任务正确项 | 任务召回率 | 整例通过 | 正确拒答 | 模型调用（已记录） |",
              "| --- | ---: | ---: | ---: | ---: | ---: |"]
     for mode, total in summary["totals"].items():
         lines.append(f"| {mode} | {total['correct_items']}/{total['expected_items']} | {percentage(total['micro_recall'])} | "
                      f"{total['passed_cases']}/{total['trials']} | {total['correct_abstentions']}/{total['abstention_targets']} | {total['model_calls_reported']} |")
+    lines += ["", "## 完成情况与答案诊断", "",
+              "完成率表示 Agent 是否正常结束，不保证答案正确。可评分答案包括尚未正常结束时写出的有效 JSON。",
+              "答案正确率只统计可评分答案，必须结合覆盖运行数阅读；无可评分答案时为未知。它不代表归档信息保留率。", "",
+              "| 模式 | 正常结束 | 完成率 | 可评分答案运行数 | 答案正确项 / 目标项 | 答案正确率 | 工具调用 |",
+              "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    for mode, total in summary["totals"].items():
+        lines.append(f"| {mode} | {total['finished_runs']}/{total['trials']} | {percentage(total['completion_rate'])} | "
+                     f"{total['gradable_answer_runs']}/{total['trials']} | {total['artifact_correct_items']}/{total['artifact_expected_items']} | "
+                     f"{percentage(total['artifact_recall'])} | {total['tool_calls_reported']} |")
+    lines += ["", "压缩模式不保证每例触发压缩；未触发的案例不能证明压缩后的召回效果。", "",
+              "| 场景 | 模式 | 触发压缩 | 停止原因 | 答案状态 | Agent 模型调用 | 摘要调用 | 工具调用 |",
+              "| --- | --- | --- | --- | --- | ---: | ---: | ---: |"]
+    for record in summary["results"]:
+        calls, summaries = record.get("model_calls"), record.get("summary_calls")
+        agent_calls = calls - summaries if calls is not None and summaries is not None else "未知"
+        lines.append(f"| {record['case_id']} | {record['mode']} | {record.get('compaction_triggered', '未知')} | "
+                     f"{record.get('stop_reason', record['status'])} | "
+                     f"{record.get('answer_state', 'unknown')} | {agent_calls} | {summaries if summaries is not None else '未知'} | "
+                     f"{record.get('tool_calls', '未知')} |")
     lines += ["", "## Token 用量", "", "所有字段按供应商含义分别统计，包含摘要调用；不自动推算费用或相加推断含缓存输入。",
               "缺失用量显示未知，不能把少量完整记录的总量当成整批用量。", "",
               "| 模式 | 输入 token | 输出 token | 缓存写入 token | 缓存读取 token | 用量完整 |",
@@ -277,10 +316,21 @@ def run_parent(args) -> int:
         ordered = sorted(specs, key=lambda s: (placement_order(s), FAMILIES.index(s["family"])))
         specs = ordered[:args.limit]
     settings = load_settings(provider=args.provider, model=args.model or ("mock-1" if args.provider == "mock" else None))
-    config = {"dataset_version": 1, "dataset_sha256": digest(load_specs()), "provider": args.provider,
+    config = {"dataset_version": DATASET_VERSION, "dataset_seed": DATASET_SEED, "dataset_sha256": digest(load_specs()), "provider": args.provider,
               "suite_sha256": suite_signature(),
               "model": settings.model, "base_url": settings.base_url, "repeats": args.repeats,
               "max_turns": args.max_turns, "max_tokens": args.max_tokens, "timeout": args.timeout,
+              "compaction_thresholds": {"context_chars": ContextCompactor.CONTEXT_CHAR_LIMIT,
+                                        "max_messages": ContextCompactor.SNIP_MAX_MESSAGES,
+                                        "keep_messages": ContextCompactor.SNIP_KEEP_MESSAGES,
+                                        "tool_result_batch_chars": ContextCompactor.TOOL_RESULT_BATCH_CHAR_LIMIT,
+                                        "large_result_chars": ContextCompactor.LARGE_RESULT_CHAR_LIMIT,
+                                        "keep_recent_results": ContextCompactor.KEEP_RECENT_RESULTS,
+                                        "micro_min_chars": ContextCompactor.MICRO_COMPACT_MIN_CHARS,
+                                        "persist_preview_chars": ContextCompactor.PERSIST_PREVIEW_CHARS,
+                                        "fit_preview_chars": ContextCompactor.FIT_PREVIEW_CHARS,
+                                        "summary_input_chars": ContextCompactor.SUMMARY_INPUT_CHAR_LIMIT,
+                                        "summary_max_tokens": ContextCompactor.SUMMARY_MAX_TOKENS},
               "case_ids": [s["id"] for s in specs], "modes": ["full", "compact"] if args.mode == "both" else [args.mode]}
     planned = len(specs) * args.repeats * len(config["modes"])
     print(f"Plan: {len(specs)} conditions, {planned} Agent runs. Each run may issue multiple model calls.", flush=True)
@@ -298,7 +348,7 @@ def run_parent(args) -> int:
     else:
         batch.mkdir(parents=True, exist_ok=False)
         save_json(batch / "config.json", config)
-        save_json(batch / "dataset.json", {"version": 1, "cases": specs})
+        save_json(batch / "dataset.json", {"version": DATASET_VERSION, "seed": DATASET_SEED, "cases": specs})
     records = []
     try:
         for repeat in range(1, args.repeats + 1):
@@ -349,7 +399,15 @@ def run_parent(args) -> int:
                     save_json(result_path, record)
                     records.append(record)
                     write_report(batch, summarize(records, config))
-                    print(f"[{len(records)}/{planned}] {spec['id']}/{mode}: {record['status']}; recall={record['correct_items']}/{record['expected_items']}", flush=True)
+                    grading = record.get("grading")
+                    artifact = (f"{grading['correct_items']}/{record['expected_items']}"
+                                if grading and not grading["format_error"] else "unavailable")
+                    print(f"[{len(records)}/{planned}] {spec['id']}/{mode}: {record['status']}; "
+                          f"task_recall={record['correct_items']}/{record['expected_items']}; "
+                          f"stop={record.get('stop_reason', record['status'])}; "
+                          f"compaction={record.get('compaction_triggered', 'unknown')}; "
+                          f"answer={record.get('answer_state', 'unknown')}; answer_correct={artifact}; "
+                          f"tools={record.get('tool_calls', 'unknown')}", flush=True)
     except KeyboardInterrupt:
         print(f"Interrupted. Resume with the same flags plus --resume {batch}", file=sys.stderr)
         return 130
@@ -371,7 +429,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=240)
-    parser.add_argument("--max-turns", type=int, default=12)
+    parser.add_argument("--max-turns", type=int, default=40)
     parser.add_argument("--max-tokens", type=int, default=4000)
     parser.add_argument("--output", type=Path, default=ROOT / ".scratch" / "evals")
     parser.add_argument("--resume", type=Path)

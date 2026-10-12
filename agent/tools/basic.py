@@ -28,9 +28,9 @@ from .result import ToolError, ToolResult, tool_error
 MAX_TOOL_OUTPUT = 50_000  # 任何工具输出最多5万字符，超出截断
 BASH_TIMEOUT_SECONDS = 120 # bash默认120秒超时
 GLOB_MAX_MATCHES = 200 # glob最多返回200个匹配
-GREP_MAX_MATCHES = 200 # grep最多返回200行匹配
+GREP_MAX_MATCHES = 500 # grep最多返回500行匹配，另受总输出字符预算限制
 GREP_MAX_FILE_BYTES = 2_000_000 # 跳过超2MB的文件
-GREP_LINE_LIMIT = 400 # 每行最多显示400字符
+GREP_LINE_LIMIT = 1000 # 每条命中内容最多1000字符，围绕匹配位置显示
 
 
 class WorkspaceEscapeError(ToolError, ValueError):
@@ -266,6 +266,17 @@ def _iter_files(root: Path, include: str | None) -> list[Path]:
     return sorted(found)
 
 
+def _grep_preview(line: str, match: re.Match[str]) -> str:
+    """Keep the first match visible even when it occurs deep in a JSONL line."""
+    if len(line) <= GREP_LINE_LIMIT:
+        return line
+    # Reserve space for both omission markers, with some context before the hit.
+    window = GREP_LINE_LIMIT - 6
+    start = max(0, min(match.start() - 40, len(line) - window))
+    end = start + window
+    return ("..." if start else "") + line[start:end] + ("..." if end < len(line) else "")
+
+
 def run_grep(args: dict, ctx: ToolContext) -> str:
     pattern = args.get("pattern", "")
     if not isinstance(pattern, str) or not pattern:
@@ -285,10 +296,15 @@ def run_grep(args: dict, ctx: ToolContext) -> str:
     files = [root] if root.is_file() else _iter_files(root, include)
     results: list[str] = []
     truncated = False
+    output_chars = 0
+    truncation_note = (
+        f"... (results limited to {GREP_MAX_MATCHES} matching lines or "
+        f"{MAX_TOOL_OUTPUT} characters; narrow the pattern or search a specific file)"
+    )
+    result_budget = MAX_TOOL_OUTPUT - len(truncation_note) - 1
 
     for file in files:
-        if len(results) >= GREP_MAX_MATCHES:
-            truncated = True
+        if truncated:
             break
         try:
             if file.stat().st_size > GREP_MAX_FILE_BYTES:
@@ -305,16 +321,20 @@ def run_grep(args: dict, ctx: ToolContext) -> str:
             relative = file.as_posix()
 
         for number, line in enumerate(text.splitlines(), start=1):
-            if regex.search(line):
-                results.append(f"{relative}:{number}:{line[:GREP_LINE_LIMIT]}")
-                if len(results) >= GREP_MAX_MATCHES:
+            match = regex.search(line)
+            if match is not None:
+                row = f"{relative}:{number}:{_grep_preview(line, match)}"
+                row_chars = len(row) + (1 if results else 0)
+                if len(results) >= GREP_MAX_MATCHES or output_chars + row_chars > result_budget:
                     truncated = True
                     break
+                results.append(row)
+                output_chars += row_chars
 
-    if not results:
+    if not results and not truncated:
         return "(no matches)"
     if truncated:
-        results.append(f"... (stopped at {GREP_MAX_MATCHES} matches; narrow the pattern)")
+        results.append(truncation_note)
     return "\n".join(results)
 
 
@@ -387,7 +407,10 @@ def register_basic_tools(registry: ToolRegistry) -> ToolRegistry:
     registry.add("write_file", "Create or overwrite a file.", _WRITE_SCHEMA, run_write_file)
     registry.add("edit_file", "Replace exact text in a file.", _EDIT_SCHEMA, run_edit_file)
     registry.add("glob", "Find files by glob pattern.", _GLOB_SCHEMA, run_glob, read_only=True, retry_safe=True)
-    registry.add("grep", "Search file contents with a regular expression.", _GREP_SCHEMA, run_grep, read_only=True, retry_safe=True)
+    registry.add("grep", "Search file contents with a regular expression. Returns up to 500 matching lines, "
+                 "each with its file, line number and an excerpt of up to 1000 characters around the first match. "
+                 "Output is capped at 50000 characters; use read_file for full context.",
+                 _GREP_SCHEMA, run_grep, read_only=True, retry_safe=True)
     return registry
 
 

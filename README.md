@@ -259,13 +259,17 @@ hooks 是实例而不是全局变量，所以每个队友、每个子 agent 都�
 ```
 每一轮都跑
   stage 1  tool_result_budget   超大结果落盘，只留预览
-  stage 2  snip_compact         超过 50 条就把中间归档，留一个存档标记
+  stage 2  snip_compact         超过 200 条就把中间归档，保留约 120 条及存档标记
 
-只有 estimate_chars(messages) > 50000 才跑
+只有 estimate_chars(messages) > 160000 才跑
   stage 3  micro_compact        已读过的旧结果换成一行指针
   stage 4  fit_tool_results     还超就把最大的继续瘦身
   stage 5  compact_history      一次模型调用，总结全部历史
 ```
+
+消息数触发阈值与压缩后的保留量分开，避免每增加一轮工具消息就再次归档；边界上的工具调用和结果会一起保留。字符阈值仍以序列化消息的字符数计算，不等于 token 数。
+
+阶段 1 的最新工具结果批次预算为 300,000 字符，只对其中超过 50,000 字符的单个结果落盘，保留 6,000 字符预览。阶段 3 保留最近 12 个已消费结果以及未消费结果，仅替换超过 1,000 字符的旧结果，目标为 128,000 字符，已经是指针的内容不重复计数。阶段 4 的预览为 4,000 字符；阶段 5 的摘要输入上限为 160,000 字符，输出预算为 4,000 token。阶段 4、5 都只在前一阶段处理后仍超过 160,000 字符时执行。
 
 外加一条应急路径：请求被供应商以 "prompt too long" 拒了，
 就 `reactive_compact` 后重试**一次**。
@@ -395,6 +399,8 @@ call 1:  30 tools, mcp=[search, get_version, list_topics]
 | 委派 | `task`（子 agent） |
 | 外部能力 | `connect_mcp` + 运行时的 `mcp__<server>__<tool>` |
 | 团队 | `spawn_teammate` `list_teammates` `send_message` `request_plan` `review_plan` `pending_requests` `request_shutdown` `create_worktree` `remove_worktree` `list_worktrees` |
+
+`grep` 最多返回 500 个匹配行；每条内容片段最多 1000 字符，围绕该行首次命中位置显示，并保留文件名和行号。总输出最多 50000 字符，因此长片段可能先达到字符上限。截断时会提示缩小搜索范围；需要完整内容时使用 `read_file`。
 
 > `grep` 不在课程的工具集里（s02 是 bash/read/write/edit/glob 五个）。
 > 这里加上了，因为一个没有 grep 的编码 agent 是残废的。
