@@ -22,9 +22,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .shell import shell_guidance
+
 IDENTITY = (
     "You are a coding agent working in {workdir}. "
     "Use tools to solve tasks. Act, don't explain what you are about to do."
+)
+
+EXECUTION_EFFICIENCY = (
+    "Work efficiently: when several independent tool calls have known arguments, "
+    "issue them together in one response (for example, reading several known files). "
+    "Wait for results before issuing calls that depend on them. Keep reads and searches "
+    "focused on the task. Reuse verified findings already in this conversation while "
+    "the relevant files are unchanged; inspect again after changes or when verification "
+    "needs fresh evidence. If a command fails, use the error to choose a concrete fix "
+    "instead of repeatedly running equivalent commands. Once the requested changes and "
+    "relevant checks are complete, give the final answer."
 )
 
 COMPACTION_NOTE = (
@@ -82,11 +95,12 @@ def build_system_prompt(
     extra: list[str] | None = None, # 额外追加的段落，默认无
 ) -> str:
     """Assemble the full system prompt."""
-    sections: list[str] = [IDENTITY.format(workdir=workdir)] # 身份
+    sections: list[str] = [IDENTITY.format(workdir=workdir), EXECUTION_EFFICIENCY] # 身份
 
     environment = [
         f"Workspace root: {workdir}",
         f"Shell: {shell}",
+        shell_guidance(),
         "All file paths you pass to tools are resolved relative to the workspace. "
         "Paths outside it require explicit approval.",
     ]
@@ -96,9 +110,9 @@ def build_system_prompt(
 
     if "todo_write" in tool_names:
         sections.append(
-            "Before starting any task with more than two steps, call todo_write to "
-            "lay out the plan, then keep exactly one item in_progress and mark each "
-            "item completed as soon as it is done. An agent without a plan drifts."
+            "For substantial work with multiple phases, use todo_write for a compact "
+            "plan and keep exactly one item in_progress. Update it when a phase changes "
+            "or finishes; skip a separate checklist for a small lookup or a focused edit."
         )
 
     if skill_catalog and skill_catalog != "(no skills found)":

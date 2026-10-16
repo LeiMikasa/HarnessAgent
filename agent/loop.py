@@ -33,9 +33,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .context import COMPACT_FLAG, ContextCompactor, is_prompt_too_long
+from .diagnostics import RunTrace, traced_loop
 from .events import POST_TOOL_USE, PRE_TOOL_USE, STOP, Hooks, StopDirective
 from .llm import LLMClient, extract_text, make_tool_result, tool_use_blocks
 from .tools.registry import ToolContext, ToolRegistry
+from .tools.feedback import CommandFeedback
 from .tools.result import ToolResult
 from .tools.recovery import ToolRecovery
 
@@ -71,17 +73,32 @@ def execute_tool(
     # An approved path-escape is good for exactly one call.  Clearing it here
     # means an approval can never leak into the next tool call.
     recovery = recovery if recovery is not None else ToolRecovery() #准备恢复管理器，取出工具名和参数
+    attempts_start = len(recovery.events)
     name, args = block.get("name", ""), block.get("input", {})
     if not isinstance(name, str):
         name = "<invalid-tool-name>"  # 如果模型传来的工具名不是字符串，就先替换成一个安全的占位名称，避免后续查询注册表时发生类型错误。
+    trace = ctx.extra.get("diagnostics")
+    tool = registry.get(name)
+    trace_name = name if tool else "<unknown>"
+    call_started = time.monotonic()
+    call_id = trace.tool_started(trace_name, args, ctx) if isinstance(trace, RunTrace) else ""
     key = recovery.key(name, args, ctx) # 创建唯一key
+
+    def finish(output: ToolResult) -> ToolResult:
+        if isinstance(trace, RunTrace):
+            trace.tool_finished(trace_name, args, output, ctx,
+                                read_only=bool(tool and tool.read_only),
+                                attempts=recovery.events[attempts_start:], call_id=call_id,
+                                elapsed=time.monotonic() - call_started)
+        return output
+
     ctx.extra.pop("allow_outside", None) # 清除旧的临时权限
     # 实际上检查了两类情况 同一个工具，目标的修正次数已经耗尽或者这个文件上一次修改结果不确定，需要先检查状态
     exhausted = recovery.exhausted(key) # 检查当前调用是否已经被恢复规则拦住
     invalid = exhausted if exhausted is not None else registry.validate(name, args)
     if invalid is not None:
         recovery.record(name, args, invalid, phase="validation", attempt=0)
-        return recovery.observe(key, invalid)
+        return finish(recovery.observe(key, invalid))
     for attempt in range(1, recovery.max_retries + 2):
         # Re-check permission for EVERY attempt; never reuse an escape approval.
         ctx.extra.pop("allow_outside", None)
@@ -90,7 +107,7 @@ def execute_tool(
             output = blocked if isinstance(blocked, ToolResult) else ToolResult.failure(
                 "POLICY_BLOCKED", str(blocked))
             recovery.record(name, args, output, phase="permission", attempt=0)
-            return output
+            return finish(output)
         started = time.monotonic()
         try:
             output = registry.dispatch(name, args, ctx)
@@ -101,11 +118,12 @@ def execute_tool(
         recovery.record(name, args, output, phase="execution", attempt=attempt,
                         elapsed=time.monotonic() - started, retry=retry)
         if not retry: # 不再重试有三种原因，已经成功  失败，但不适合自动重试  失败，而且重试次数已经用完
-            return recovery.observe(key, output)
+            return finish(recovery.observe(key, output))
         recovery.wait(attempt)
     raise AssertionError("tool retry budget was not enforced")
 
 
+@traced_loop
 def run_loop(
     *,
     llm: LLMClient,
@@ -134,6 +152,8 @@ def run_loop(
     reactive_retries = 0  # 应急压缩重试次数从 0 开始；
     incomplete_retries = 0
     recovery_note = ""
+    command_note = ""
+    command_feedback = CommandFeedback()
     result = LoopResult() # 创建默认结果对象
     recovery = ToolRecovery()
     ctx.extra["tool_attempts"] = recovery.events
@@ -148,6 +168,9 @@ def run_loop(
 
     for turn in range(1, max(1, max_turns) + 1):
         result.turns = turn
+        trace = ctx.extra.get("diagnostics")
+        if isinstance(trace, RunTrace):
+            trace.round_started(turn, messages)
         progress(f"[model] round {turn}: preparing context")
 
         # -- layer 0: anything the harness owes the model right now ---------
@@ -157,10 +180,15 @@ def run_loop(
         # -- layer 1: make room before asking -------------------------------
         if compactor is not None:
             messages[:] = compactor.prepare(messages, active_request) # 正常的预防性压缩
+        if isinstance(trace, RunTrace):
+            trace.record("context_prepared", message_count=len(messages),
+                         context_chars=ContextCompactor.estimate_chars(messages))
 
         system_prompt = system() if callable(system) else system # 因此 system prompt 能够随运行状态动态更新。工具
         if recovery_note:
             system_prompt += "\n\n" + recovery_note
+        if command_note:
+            system_prompt += "\n\n" + command_note
 
         # -- re-read the tool pool on EVERY iteration ----------------------
         # Not an optimisation detail: `connect_mcp` adds tools mid-turn, so a
@@ -185,6 +213,8 @@ def run_loop(
                 and reactive_retries < MAX_REACTIVE_RETRIES # 尚未重试过
             ):
                 emit("[reactive compact]")
+                if isinstance(trace, RunTrace):
+                    trace.record("recovery", kind="context_overflow")
                 messages[:] = compactor.reactive_compact(messages, active_request) # 强制压缩
                 reactive_retries += 1
                 continue
@@ -215,6 +245,8 @@ def run_loop(
                 progress("[model] stopped: truncated tool call recovery exhausted")
                 return result
             incomplete_retries += 1
+            if isinstance(trace, RunTrace):
+                trace.record("recovery", kind="truncated_tool_call", attempt=incomplete_retries)
             recovery_note = (
                 "[harness recovery] The previous response reached the output limit while generating "
                 "tool calls. None of that response's tool calls were executed; earlier completed "
@@ -242,6 +274,8 @@ def run_loop(
                 progress("[model] stopped: incomplete response recovery exhausted")
                 return result
             incomplete_retries += 1
+            if isinstance(trace, RunTrace):
+                trace.record("recovery", kind="incomplete_response", attempt=incomplete_retries)
             recovery_note = (
                 "[harness recovery] The previous response was incomplete. Continue the user's task "
                 "with a concrete tool call or a concise answer. Keep reasoning and each step short; "
@@ -282,6 +316,7 @@ def run_loop(
 
         # -- execute the batch, collect results -----------------------------
         results = []
+        command_notes = []
         for block in calls:
             name = block.get("name", "")
             # Tool names originate in the model response.  Keep terminal
@@ -290,6 +325,12 @@ def run_loop(
             progress(f"[tool] {label}: running")
             started = time.monotonic()
             output = execute_tool(block, registry, ctx, hook_registry, recovery)
+            tool = registry.get(name) if isinstance(name, str) else None
+            advice = command_feedback.observe(name, block.get("input", {}), output, tool)
+            if advice:
+                command_notes.append(advice)
+                if isinstance(trace, RunTrace):
+                    trace.record("command_feedback", failure_streak=command_feedback.streak)
             progress(f"[tool] {label}: returned in {time.monotonic() - started:.1f}s")
             result.tool_calls += 1
             preview_note = " (showing first 160 chars)" if len(output) > 160 else ""
@@ -297,6 +338,9 @@ def run_loop(
             results.append(make_tool_result(block.get("id", ""), output.model_content(),
                                             is_error=not output.ok))
         messages.append({"role": "user", "content": results})
+        # One bounded host-authored note for the next model request. Do not add
+        # conversational turns, replay commands, or force completion.
+        command_note = max(command_notes, key=len, default="")
 
         # -- the model asked for room: compact now that the batch is safe ---
         # Deferred on purpose.  A `write_file` in this same batch must be

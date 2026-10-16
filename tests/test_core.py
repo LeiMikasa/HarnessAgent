@@ -291,7 +291,9 @@ class BasicToolTests(HarnessCase):
             script=[{"tool": "bash", "input": {"command": "exit 3"}}, "noted"]
         )
         runtime.submit("fail on purpose")
-        self.assertIn("status 3", self.tool_result_texts(runtime)[0])
+        failure = json.loads(self.tool_result_texts(runtime)[0])
+        self.assertEqual(failure["error_code"], "COMMAND_FAILED")
+        self.assertIn("Exit code: 3", failure["message"])
 
 
 # ==========================================================================

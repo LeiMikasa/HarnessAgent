@@ -34,6 +34,7 @@ from typing import Any, Callable
 
 from .config import Settings, load_settings
 from .context import ContextCompactor, register_compaction_tools
+from .diagnostics import ObservedLLM, RunTrace
 from .events import (
     POST_TOOL_USE,
     PRE_TOOL_USE,
@@ -88,6 +89,7 @@ class Runtime:
         on_event: Callable[[str], None] | None = None,
         on_progress: Callable[[str], None] | None = None,
         goal_evaluator: GoalEvaluator | None = None,
+        diagnostics_enabled: bool = True,
     ):
         self.settings = settings
         self.llm = llm
@@ -98,6 +100,8 @@ class Runtime:
         self.notes: list[str] = []
 
         settings.ensure_dirs()
+        self.diagnostics = (RunTrace(settings.state_dir / "runs", provider=settings.provider,
+                                     model=settings.model) if diagnostics_enabled else None)
 
         # -- the tool pool --------------------------------------------------
         # 工具注册
@@ -120,7 +124,7 @@ class Runtime:
         self.todos = TodoList()
         self.tasks = TaskStore(settings.tasks_dir)
         self.memory = MemoryStore(
-            llm,
+            ObservedLLM(llm, self.diagnostics, "memory") if self.diagnostics else llm,
             settings.model,
             settings.memory_dir,
             settings.workdir,
@@ -128,7 +132,7 @@ class Runtime:
             verbose=verbose,
         )
         self.compactor = ContextCompactor(
-            llm,
+            ObservedLLM(llm, self.diagnostics, "summary") if self.diagnostics else llm,
             settings.model,
             settings.transcripts_dir,
             settings.state_dir / "tool-results",
@@ -137,7 +141,10 @@ class Runtime:
         )
         if goal_evaluator is None:
             judge_settings = replace(settings, model=settings.goal_evaluator_model or settings.model)
-            goal_evaluator = PromptGoalEvaluator(build_client(judge_settings))
+            judge_client = build_client(judge_settings)
+            if self.diagnostics:
+                judge_client = ObservedLLM(judge_client, self.diagnostics, "goal_evaluation")
+            goal_evaluator = PromptGoalEvaluator(judge_client)
         self.goal = GoalController(goal_evaluator, settings.goal_block_cap)
         self.mcp = MCPManager(
             retry_safe_tools={("docs", "search"), ("docs", "get_version"), ("docs", "list_topics")},
@@ -171,6 +178,8 @@ class Runtime:
             interactive=True,
             runtime=self,
         )
+        if self.diagnostics:
+            self.lead_ctx.extra["diagnostics"] = self.diagnostics
 
         # -- teams (needs the lead context above to exist first) ------------
         self.teams: TeamManager | None = None
@@ -452,6 +461,8 @@ class Runtime:
         on_event: Callable[[str], None] | None = None,
     ) -> str:
         """The callable teammates use to run their own turns."""
+        if self.diagnostics:
+            ctx.extra["diagnostics"] = self.diagnostics
         result = run_loop(
             llm=llm,
             registry=registry,
@@ -662,6 +673,9 @@ class Runtime:
             f"turns:      {self.stats.turns}, tool calls: {self.stats.tool_calls}",
             f"permissions:{self.permissions.summary()}",
             f"goal:       {self.goal.summary()}",
+            f"features:   teams={'on' if self.teams is not None else 'off'}, "
+            f"memory={'on' if self.memory.enabled else 'off'}",
+            f"trace:      {self.diagnostics.events_path if self.diagnostics else 'disabled'}",
         ]
         if self.teams is not None:
             lines.append(f"team:       {len(self.teams.teammates)} teammate(s)")
@@ -671,6 +685,8 @@ class Runtime:
         if self.teams is not None:
             self.teams.stop_all()
         self.mcp.close_all()
+        if self.diagnostics:
+            self.diagnostics.flush()
 
     def __enter__(self) -> "Runtime":
         return self

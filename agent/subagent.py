@@ -121,9 +121,10 @@ TASK_SCHEMA = {
 
 TASK_DESCRIPTION = (
     "Run a subagent with a fresh conversation and return only its final text. "
-    "Use it for focused exploration, or for any self-contained subtask whose "
-    "intermediate steps would clutter this conversation. The subagent cannot "
-    "delegate further."
+    "Complete small lookups and focused edits yourself. Delegate substantial "
+    "self-contained exploration whose intermediate steps would clutter this "
+    "conversation. Include necessary context and acceptance criteria. "
+    "The subagent cannot delegate further."
 )
 
 

@@ -18,9 +18,9 @@ import glob as globlib
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
+from ..shell import decode_shell_output, shell_guidance, shell_name
 from .registry import ToolContext, ToolRegistry
 from .result import ToolError, ToolResult, tool_error
 
@@ -85,14 +85,15 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
     timeout = args.get("timeout")
     timeout = BASH_TIMEOUT_SECONDS if not isinstance(timeout, (int, float)) else float(timeout)
 
+    child_env = dict(os.environ)
+    child_env.setdefault("PYTHONIOENCODING", "utf-8")
     try:
         result = subprocess.run(
             command,
             shell=True,
             cwd=str(ctx.workdir),
             capture_output=True, # 捕获 stdout+stderr
-            text=True,   # 文本模式
-            errors="replace",  # 解码错误用 ? 替换
+            env=child_env,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -102,12 +103,20 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
     except (FileNotFoundError, OSError) as exc:
         return ToolResult.from_exception(exc)
 
-    output = (result.stdout + result.stderr).strip()
-    output = _clip(output) if output else "(no output)"
+    stdout = decode_shell_output(result.stdout).strip()
+    stderr = decode_shell_output(result.stderr).strip()
     if result.returncode:
-        return tool_error("COMMAND_FAILED", f"command exited with status {result.returncode}\n{output}",
+        # Reserve room for both streams so a verbose stdout cannot hide stderr.
+        budget = MAX_TOOL_OUTPUT - 300
+        out_budget = min(len(stdout), budget // 2)
+        err_budget = min(len(stderr), budget - out_budget)
+        out_budget = min(len(stdout), budget - err_budget)
+        output = (f"Exit code: {result.returncode}\nstdout:\n{_clip(stdout, out_budget) or '(empty)'}"
+                  f"\nstderr:\n{_clip(stderr, err_budget) or '(empty)'}")
+        return tool_error("COMMAND_FAILED", output,
                           action="inspect_state", execution_status="unknown")
-    return output
+    output = "\n".join(part for part in (stdout, stderr) if part)
+    return _clip(output) if output else "(no output)"
 
 
 # --------------------------------------------------------------------------
@@ -402,7 +411,7 @@ def register_basic_tools(registry: ToolRegistry) -> ToolRegistry:
     """Add the six base tools to `registry`."""
     for schema in (_BASH_SCHEMA, _READ_SCHEMA, _WRITE_SCHEMA, _EDIT_SCHEMA, _GLOB_SCHEMA, _GREP_SCHEMA):
         schema["additionalProperties"] = False
-    registry.add("bash", "Run a shell command in the workspace.", _BASH_SCHEMA, run_bash)
+    registry.add("bash", "Run a shell command in the workspace. " + shell_guidance(), _BASH_SCHEMA, run_bash)
     registry.add("read_file", "Read a file's contents.", _READ_SCHEMA, run_read_file, read_only=True, retry_safe=True)
     registry.add("write_file", "Create or overwrite a file.", _WRITE_SCHEMA, run_write_file)
     registry.add("edit_file", "Replace exact text in a file.", _EDIT_SCHEMA, run_edit_file)
@@ -416,4 +425,4 @@ def register_basic_tools(registry: ToolRegistry) -> ToolRegistry:
 
 def shell_hint() -> str:
     """A short note about the shell the agent is driving."""
-    return "cmd.exe" if sys.platform == "win32" else "/bin/sh"
+    return shell_name()

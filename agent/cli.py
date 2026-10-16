@@ -1,6 +1,7 @@
 """Terminal entry point.
 
-    python -m agent                     interactive session
+    python -m agent                     lightweight interactive session
+    python -m agent --full              enable teams and long-term memory
     python -m agent "fix the failing test"
     python -m agent --mock --demo       offline self-check, no API key needed
     python -m agent --status            print the resolved configuration
@@ -43,6 +44,7 @@ Harness commands
   :mcp               connected MCP servers
   :memory            stored memory records
   :notes             diagnostics from the last turn
+  :trace             run counters and paths to the JSONL trace and summary
   :goal [condition]  show or set a goal and start work; :goal clear cancels
   :clear             forget this conversation and goal (keeps tasks and memory)
   :quit              exit  (also: q, exit, Ctrl+C, Ctrl+D)
@@ -76,8 +78,16 @@ def _build_parser() -> argparse.ArgumentParser:
     output.add_argument("--verbose", "-v", action="store_true", help="Show progress and detailed event logs.")
     output.add_argument("--quiet", action="store_true", help="Show only the final answer.")
 
-    parser.add_argument("--no-teams", action="store_true", help="Disable teammates and worktrees.")
-    parser.add_argument("--no-memory", action="store_true", help="Disable the memory system.")
+    parser.add_argument("--full", action="store_true", help="Enable teams and memory (both off by default).")
+    teams = parser.add_mutually_exclusive_group()
+    teams.add_argument("--teams", dest="teams", action="store_true", default=None,
+                       help="Enable teammates and worktrees.")
+    teams.add_argument("--no-teams", dest="teams", action="store_false", help="Disable teammates and worktrees.")
+    memory = parser.add_mutually_exclusive_group()
+    memory.add_argument("--memory", dest="memory", action="store_true", default=None,
+                        help="Enable long-term memory and its model calls.")
+    memory.add_argument("--no-memory", dest="memory", action="store_false", help="Disable the memory system.")
+    parser.add_argument("--no-trace", action="store_true", help="Disable payload-free execution traces.")
     parser.add_argument("--no-compaction", action="store_true", help="Disable context compaction.")
     parser.add_argument(
         "--no-plan-gate",
@@ -148,6 +158,23 @@ def _print_progress(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def _run_summary(runtime: Runtime) -> str:
+    if not runtime.diagnostics:
+        return ""
+    counts = runtime.diagnostics.summary()["counts"]
+    return (f"[run, session total] rounds={counts.get('loop_rounds', 0)}; "
+            f"model_calls={counts.get('model_calls', 0)}; tools={counts.get('tool_calls', 0)}; "
+            f"tool_errors={counts.get('tool_errors', 0)}; "
+            f"repeated_read_results={counts.get('same_read_result_repeats', 0)}\n"
+            f"[trace] {runtime.diagnostics.events_path}"
+            + (f"\n[trace] {runtime.diagnostics.error}" if runtime.diagnostics.error else ""))
+
+
+def _report_run(runtime: Runtime) -> None:
+    if runtime.on_progress and (summary := _run_summary(runtime)):
+        runtime.on_progress(summary)
+
+
 def _repl(runtime: Runtime) -> int:
     _print(BANNER)
     while True:
@@ -177,6 +204,7 @@ def _repl(runtime: Runtime) -> int:
         except Exception as exc:  # noqa: BLE001 - a REPL must not die
             _print(f"\033[31mError: {type(exc).__name__}: {exc}\033[0m")
             continue
+        _report_run(runtime)
         _print()
         _print(answer)
         _print()
@@ -216,9 +244,12 @@ def _command(runtime: Runtime, raw: str) -> bool:
             _print(f"  [{record['type']}] {record['name']}: {record['description']}")
     elif name == "notes":
         _print("\n".join(runtime.notes) if runtime.notes else "No notes.")
+    elif name == "trace":
+        _print(runtime.diagnostics.report() if runtime.diagnostics else "Tracing is disabled.")
     elif name == "goal":
         try:
             _print(runtime.goal_command(argument))
+            _report_run(runtime)
         except ValueError as exc:
             _print(f"Invalid goal: {exc}")
     elif name == "clear":
@@ -232,6 +263,8 @@ def _command(runtime: Runtime, raw: str) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    teams_enabled = args.teams if args.teams is not None else args.full
+    memory_enabled = args.memory if args.memory is not None else args.full
 
     overrides: dict[str, Any] = {}
     if args.provider:
@@ -260,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.status:
         _print(settings.describe())
+        _print(f"features: teams={'on' if teams_enabled else 'off'}, "
+               f"memory={'on' if memory_enabled else 'off'}, trace={'off' if args.no_trace else 'on'}")
         return 0
 
     if not settings.is_mock and not settings.api_key:
@@ -276,8 +311,9 @@ def main(argv: list[str] | None = None) -> int:
         # line.  Passing a literal default here would shadow AGENT_APPROVAL in
         # .env, making that setting silently do nothing.
         **({"approval": overrides["approval"]} if "approval" in overrides else {}),
-        teams_enabled=not args.no_teams,
-        memory_enabled=not args.no_memory,
+        teams_enabled=teams_enabled,
+        memory_enabled=memory_enabled,
+        diagnostics_enabled=not args.no_trace,
         compaction_enabled=not args.no_compaction,
         require_plan=not args.no_plan_gate,
         verbose=args.verbose,
@@ -289,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.demo:
             _print("\033[36m[demo] running offline against the mock model\033[0m")
             answer = runtime.submit("Write a greeting module and verify it works.")
+            _report_run(runtime)
             _print()
             _print(answer)
             _print()
@@ -298,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.request:
             answer = runtime.submit(" ".join(args.request))
             answer = runtime.wait_for_teammates(initial_answer=answer)
+            _report_run(runtime)
             _print(answer)
             return 0
 

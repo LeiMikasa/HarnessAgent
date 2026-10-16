@@ -12,6 +12,8 @@ s01–s10、s13、s14 章，把它们从"每章一个独立文件"重构成一�
 
 工具执行现已增加统一 JSON Schema 校验、结构化错误和按错误类型恢复。参数错误由模型修正；只读且由宿主明确允许的工具遇到暂时性故障，最多自动重试两次；写入结果未知时先检查文件状态。使用现有环境时执行 `python -m pip install -r requirements.txt` 安装新增的 `jsonschema` 依赖。实现、预算和边界见 [工具错误恢复说明](docs/工具错误恢复说明.md)。
 
+命令执行会向模型说明实际 Shell，优先正确解码 UTF-8 中文输出；失败时分开显示退出码、stdout 和 stderr，并在下一轮提供有界诊断提醒。相同命令和可见错误重复出现时提醒更换诊断方式，正常修复仍可继续。见 [命令执行与失败诊断](docs/命令执行与失败诊断.md)。
+
 ---
 
 ## 1. 它长什么样
@@ -128,7 +130,10 @@ pip install -r requirements.txt
 cp .env.example .env        # 填入 ANTHROPIC_API_KEY
 
 python preflight.py --tools    # 先验证供应商：模型 id、连通性、工具调用
-python -m agent                                     # 交互式
+python -m agent                                     # 轻量交互式：团队、长期记忆默认关闭
+python -m agent --full                              # 开启团队与长期记忆
+python -m agent --teams                             # 只开启团队
+python -m agent --memory                            # 只开启长期记忆
 python -m agent "修复失败的测试"                      # 单次任务
 python -m agent --quiet "修复失败的测试"              # 只输出最终答案
 python -m agent --verbose                           # 显示详细事件日志
@@ -140,6 +145,16 @@ python -m agent --status                            # 打印解析后的配置
 单次任务的标准输出仍只有最终答案。`--quiet` 关闭进度，`--verbose` 额外显示
 工具结果预览与诊断事件。普通进度不会包含模型内部思考、工具参数或工具输出；
 详细日志可能包含工具参数和结果片段，请勿把它直接分享给不可信的人。
+
+CLI 默认采用轻量启动，避免小任务进入团队协调流程或产生记忆选择、提取调用。
+`--full` 恢复团队与记忆；`--full --no-memory` 等显式关闭参数优先。
+上下文压缩和权限检查仍然启用，原有 `Runtime` Python API 的功能默认值不变。
+
+默认将完整的轮次与调用元数据写入 `.agent/runs/<运行编号>/events.jsonl`，并生成
+`summary.json`。交互中输入 `:trace` 查看调用分类、错误、重复读取观察和日志路径；
+`--no-trace` 可关闭。此日志不保存参数正文、工具结果正文、回答或模型思考；
+`--verbose` 的终端输出是另一套详细日志。重复观察不拦截工具，不等于无效操作判定。
+参见 [运行轮次诊断](docs/运行轮次诊断.md)。
 
 默认指向 DeepSeek 的 Anthropic 兼容端点。**换供应商只改 `.env`，不改代码**：
 
@@ -183,7 +198,7 @@ tool-calling round trip         工具调用一次完整往返（外壳真正依
 交互模式下，`:` 开头的是外壳命令，其它都是给 agent 的请求：
 
 ```
-:help  :status  :tools  :skills  :todos  :tasks  :team  :mcp  :memory  :notes  :clear  :quit
+:help  :status  :tools  :skills  :todos  :tasks  :team  :mcp  :memory  :notes  :trace  :clear  :quit
 ```
 
 ---
