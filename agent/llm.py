@@ -208,6 +208,8 @@ class LLMClient(Protocol):
         messages: list[dict],
         tools: list[dict],
         max_tokens: int = 8000,
+        on_text: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> LLMResponse:  # pragma: no cover - protocol
         ...
 
@@ -227,6 +229,8 @@ class LLMError(RuntimeError):
 
 class AnthropicLLM:
     """Anthropic (or Anthropic-compatible) chat client with light retry."""
+
+    supports_text_stream = True
 
     def __init__(
         self,
@@ -268,6 +272,8 @@ class AnthropicLLM:
         messages: list[dict],
         tools: list[dict],
         max_tokens: int = 8000,
+        on_text: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> LLMResponse:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -279,7 +285,23 @@ class AnthropicLLM:
             payload["tools"] = tools
 
         try:
-            raw = self._client.messages.create(**payload)
+            if on_text is None:
+                raw = self._client.messages.create(**payload)
+            else:
+                complete = False
+                with self._client.messages.stream(**payload) as stream:
+                    for event in stream:
+                        if should_cancel and should_cancel():
+                            raise LLMError("Generation cancelled")
+                        if event.type == "message_stop":
+                            complete = True
+                        elif event.type == "content_block_delta" and event.delta.type == "text_delta":
+                            on_text(event.delta.text)
+                    if not complete:
+                        raise LLMError("Stream ended before message_stop; response was not accepted", retryable=True)
+                    raw = stream.get_final_message()
+        except LLMError:
+            raise
         except Exception as exc:  # noqa: BLE001 - normalise every provider error
             raise LLMError(
                 f"{type(exc).__name__}: {exc}",
@@ -398,6 +420,8 @@ class MockLLM:
     on the exact message history the loop produced.
     """
 
+    supports_text_stream = True
+
     def __init__(
         self,
         script: list[Any] | None = None,
@@ -441,6 +465,8 @@ class MockLLM:
         messages: list[dict],
         tools: list[dict],
         max_tokens: int = 8000,
+        on_text: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> LLMResponse:
         index = len(self.calls)
         step: Any = None
@@ -463,6 +489,12 @@ class MockLLM:
                 "response": copy.deepcopy(blocks),
             }
         )
+        if on_text:
+            text = extract_text(blocks)
+            for offset in range(0, len(text), 32):
+                if should_cancel and should_cancel():
+                    raise LLMError("Generation cancelled")
+                on_text(text[offset:offset + 32])
         return LLMResponse(content=blocks, stop_reason="end_turn" if not has_tool_use(blocks) else "tool_use")
 
 

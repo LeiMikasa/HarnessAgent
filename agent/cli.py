@@ -67,6 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mock", action="store_true", help="Use the offline scripted model.")
     parser.add_argument("--demo", action="store_true", help="Run a scripted offline demo and exit.")
     parser.add_argument("--status", action="store_true", help="Print configuration and exit.")
+    parser.add_argument("--tui", action="store_true", help="Open the interactive terminal UI with streamed text.")
 
     parser.add_argument(
         "--approval",
@@ -263,6 +264,9 @@ def _command(runtime: Runtime, raw: str) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.tui and args.quiet:
+        _print("--tui cannot be combined with --quiet.")
+        return 2
     teams_enabled = args.teams if args.teams is not None else args.full
     memory_enabled = args.memory if args.memory is not None else args.full
 
@@ -316,12 +320,20 @@ def main(argv: list[str] | None = None) -> int:
         diagnostics_enabled=not args.no_trace,
         compaction_enabled=not args.no_compaction,
         require_plan=not args.no_plan_gate,
-        verbose=args.verbose,
-        on_event=event_sink,
-        on_progress=progress_sink,
+        verbose=args.verbose and not args.tui,
+        on_event=None if args.tui else event_sink,
+        on_progress=None if args.tui else progress_sink,
     )
 
     try:
+        if args.tui:
+            try:
+                from .tui import run_tui
+            except ImportError as exc:
+                _print(f"Terminal UI dependency is unavailable ({exc}). Run: python -m pip install -r requirements.txt")
+                return 2
+            initial = "Write a greeting module and verify it works." if args.demo else " ".join(args.request)
+            return run_tui(runtime, initial_request=initial, show_details=args.verbose)
         if args.demo:
             _print("\033[36m[demo] running offline against the mock model\033[0m")
             answer = runtime.submit("Write a greeting module and verify it works.")

@@ -1,0 +1,464 @@
+"""A terminal presentation layer; agent work runs off the UI thread."""
+
+from __future__ import annotations
+
+import queue
+import json
+import re
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+
+from rich.markup import escape
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message
+from textual.screen import ModalScreen
+from textual.widgets import Button, Collapsible, Footer, Markdown, Static, TextArea
+
+from .runtime import Runtime
+from .ui_events import UIEvent
+
+
+def plain(value) -> str:
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", str(value))
+
+
+@dataclass
+class ApprovalRequest:
+    tool: str
+    arguments: str
+    reason: str
+    owner: str
+    workdir: str = ""
+    ready: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    allowed: bool = False
+
+    def resolve(self, allowed: bool) -> None:
+        with self.lock:
+            if not self.ready.is_set():
+                self.allowed = allowed
+                self.ready.set()
+
+
+class ApprovalScreen(ModalScreen[bool]):
+    BINDINGS = [Binding("y", "allow", "允许"), Binding("n", "deny", "拒绝"), Binding("escape", "deny", "拒绝")]
+
+    def __init__(self, request: ApprovalRequest):
+        super().__init__()
+        self.request = request
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="approval-box"):
+            yield Static("需要你的确认", id="approval-heading")
+            yield Static(f"调用者：{plain(self.request.owner)}\n工具：{plain(self.request.tool)}", markup=False)
+            if self.request.workdir:
+                yield Static(f"目录：{plain(self.request.workdir)}", markup=False)
+            yield Static(plain(self.request.reason), markup=False)
+            with VerticalScroll(id="approval-preview"):
+                yield Static(plain(self.request.arguments), markup=False)
+            with Horizontal(id="approval-buttons"):
+                yield Button("拒绝 · N", id="deny")
+                yield Button("允许本次 · Y", id="allow", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#deny", Button).focus()
+
+    def action_allow(self) -> None:
+        self.dismiss(True)
+
+    def action_deny(self) -> None:
+        self.dismiss(False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "allow")
+
+
+class Prompt(TextArea):
+    BINDINGS = [
+        Binding("enter", "submit", priority=True),
+        Binding("shift+enter", "newline", priority=True),
+        Binding("alt+enter", "newline", priority=True),
+        Binding("ctrl+j", "newline", priority=True),
+        Binding("ctrl+p", "previous", priority=True),
+        Binding("ctrl+n", "next", priority=True),
+    ]
+
+    class Submitted(Message):
+        def __init__(self, text: str):
+            super().__init__()
+            self.text = text
+
+    def action_submit(self) -> None:
+        if self.text.strip():
+            self.post_message(self.Submitted(self.text.strip()))
+
+    def action_newline(self) -> None:
+        self.insert("\n")
+
+    def action_previous(self) -> None:
+        self.app.move_history(-1)
+
+    def action_next(self) -> None:
+        self.app.move_history(1)
+
+
+class MessagePane(Vertical):
+    def __init__(self, heading: str, text: str = "", *, classes: str = ""):
+        super().__init__(classes="message " + classes)
+        self.heading = Static(plain(heading), classes="message-heading", markup=False)
+        self.body = Markdown(plain(text))
+        self.text = text
+
+    def compose(self) -> ComposeResult:
+        yield self.heading
+        yield self.body
+
+
+class HarnessApp(App[int]):
+    TITLE = "HarnessAgent"
+    ENABLE_COMMAND_PALETTE = False
+    BINDINGS = [Binding("ctrl+c", "stop", "停止", priority=True),
+                Binding("ctrl+q", "request_quit", "退出", priority=True),
+                Binding("ctrl+l", "focus_prompt", "输入", priority=True)]
+    CSS = """
+    Screen { background: #10141c; color: #dce4ef; }
+    #top { height: 4; padding: 0 2; border-bottom: solid #29354a; }
+    #brand { height: 1; color: #82d8ce; text-style: bold; }
+    #workspace { height: 2; color: #8e9db3; }
+    #body { height: 1fr; }
+    #chat { width: 1fr; padding: 1 2; scrollbar-size: 1 1; }
+    #sidebar { width: 29; border-left: solid #29354a; padding: 1; }
+    #sidebar-title { height: 2; color: #82d8ce; text-style: bold; }
+    #session, #team { height: auto; margin-bottom: 1; color: #a9b8cb; }
+    #status { height: 1; margin: 0 2; color: #e8bf7a; }
+    #input-area { height: 7; padding: 0 2; }
+    #prompt { height: 5; border: round #466879; background: #151d29; }
+    #prompt:focus { border: round #82d8ce; }
+    #hint { height: 1; color: #8e9db3; }
+    Footer { background: #151d29; }
+    .message { height: auto; margin-bottom: 1; padding: 0 1; border-left: solid #35465d; }
+    .message.user { border-left: solid #82d8ce; background: #151d29; }
+    .message.notice { border-left: solid #d7ae70; }
+    .message-heading { height: 1; color: #82d8ce; text-style: bold; }
+    Markdown { margin: 0; padding: 0; background: transparent; }
+    .tool { height: auto; padding: 0; margin: 0 0 1 0; background: #151d29; border: none; }
+    .tool.failed { border-left: solid #ec8e8e; }
+    ApprovalScreen { align: center middle; background: #000000 60%; }
+    #approval-box { width: 76; max-width: 95%; height: auto; max-height: 85%; padding: 1 2; border: round #e8bf7a; background: #182231; }
+    #approval-heading { height: 2; text-style: bold; color: #e8bf7a; }
+    #approval-preview { max-height: 14; height: auto; margin: 1 0; }
+    #approval-buttons { height: 3; align-horizontal: right; }
+    #approval-buttons Button { margin-left: 1; }
+    """
+
+    def __init__(self, runtime: Runtime, *, initial_request: str = "", show_details: bool = False):
+        super().__init__()
+        self.runtime = runtime
+        self.initial_request, self.show_details = initial_request, show_details
+        self.events: queue.SimpleQueue = queue.SimpleQueue()
+        self.local = threading.local()
+        self.cancel = threading.Event()
+        self.shutdown = threading.Event()
+        self.busy = False
+        self.closing = False
+        self.draining = False
+        self.history: list[str] = []
+        self.history_index = 0
+        self.draft = ""
+        self.model_panes: dict[str, MessagePane] = {}
+        self.dirty: set[str] = set()
+        self.tools: dict[str, tuple[Collapsible, Static, str]] = {}
+        self.tool_arguments: dict[str, str] = {}
+        self.pending: deque[ApprovalRequest] = deque()
+        self.current_approval: ApprovalRequest | None = None
+        self.last_final = ""
+        self.worker: threading.Thread | None = None
+        self.started_at: float | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="top"):
+            yield Static(f"HARNESS AGENT  /  {plain(self.runtime.settings.model)}", id="brand", markup=False)
+            yield Static(f"工作区  {plain(self.runtime.settings.workdir)}", id="workspace", markup=False)
+        with Horizontal(id="body"):
+            yield VerticalScroll(id="chat")
+            with Vertical(id="sidebar"):
+                yield Static("会话状态", id="sidebar-title")
+                yield Static("", id="session", markup=False)
+                yield Static("", id="team", markup=False)
+        yield Static("就绪", id="status", markup=False)
+        with Vertical(id="input-area"):
+            yield Prompt(id="prompt", placeholder="输入任务，或 :help 查看命令", highlight_cursor_line=False)
+            yield Static("Enter 发送 · Alt+Enter / Ctrl+J 换行 · Ctrl+P/N 历史 · Ctrl+C 停止", id="hint")
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.runtime.on_ui_event = self.receive_event
+        self.runtime.on_progress = None
+        self.runtime.on_event = None
+        self.runtime.permissions.approver = self.approve
+        self.set_interval(0.05, self.drain_events)
+        self.set_interval(0.5, self.update_sidebar)
+        self.query_one("#prompt", Prompt).focus()
+        self.update_sidebar()
+        await self.add_message("开始工作", "直接输入任务即可。工具结果可以点击展开；审批会在确认窗口中显示。", "notice")
+        if self.initial_request:
+            await self.submit(self.initial_request)
+
+    def on_resize(self) -> None:
+        if self.is_mounted and self.query("#sidebar"):
+            self.query_one("#sidebar").display = self.size.width >= 100
+
+    def receive_event(self, event: UIEvent) -> None:
+        self.local.owner = event.owner
+        if "workdir" in event.data:
+            self.local.workdir = event.data["workdir"]
+        if not self.shutdown.is_set():
+            self.events.put(event)
+
+    def approve(self, tool: str, args: dict, reason: str) -> bool:
+        if self.shutdown.is_set() or self.cancel.is_set():
+            return False
+        if self.runtime.permissions.approval == "allow":
+            return True
+        if self.runtime.permissions.approval == "deny":
+            return False
+        request = ApprovalRequest(tool, json.dumps(args, ensure_ascii=False, indent=2, default=str), reason,
+                                  getattr(self.local, "owner", "lead"),
+                                  getattr(self.local, "workdir", str(self.runtime.settings.workdir)))
+        self.events.put(request)
+        while not request.ready.wait(0.1):
+            if self.shutdown.is_set() or self.cancel.is_set():
+                request.resolve(False)
+        return request.allowed
+
+    async def add_message(self, heading: str, text: str = "", classes: str = "") -> MessagePane:
+        pane = MessagePane(heading, text, classes=classes)
+        await self.query_one("#chat", VerticalScroll).mount(pane)
+        return pane
+
+    async def on_prompt_submitted(self, event: Prompt.Submitted) -> None:
+        await self.submit(event.text)
+
+    async def submit(self, text: str) -> None:
+        if self.busy:
+            self.query_one("#status", Static).update("当前任务尚未结束；Ctrl+C 请求停止后再发送")
+            return
+        if text.strip().lower() in (":quit", ":q", ":exit", "quit", "exit", "q"):
+            self.action_request_quit()
+            return
+        if text.strip() == ":clear":
+            self.runtime.messages.clear()
+            self.runtime.goal.clear()
+            await self.query_one("#chat", VerticalScroll).remove_children()
+            self.model_panes.clear()
+            self.tools.clear()
+            self.tool_arguments.clear()
+            self.query_one("#prompt", Prompt).clear()
+            return
+        self.history.append(text)
+        self.history_index = len(self.history)
+        self.query_one("#prompt", Prompt).clear()
+        await self.add_message("你", text, "user")
+        self.busy, self.last_final = True, ""
+        self.started_at = time.monotonic()
+        self.cancel = threading.Event()
+        self.runtime.cancel_event = self.cancel
+        self.query_one("#status", Static).update("正在准备任务…")
+        self.worker = threading.Thread(target=self.run_request, args=(text,), daemon=True, name="harness-ui-request")
+        self.worker.start()
+
+    def run_request(self, text: str) -> None:
+        failed = False
+        try:
+            if text.startswith(":") and not text.startswith(":goal"):
+                answer = self.read_command(text)
+            else:
+                answer = self.runtime.submit(text)
+                if not self.cancel.is_set():
+                    answer = self.runtime.wait_for_teammates(initial_answer=answer)
+        except Exception as error:
+            failed = True
+            answer = f"{type(error).__name__}: {error}"
+        finally:
+            if self.cancel.is_set() and self.runtime.teams:
+                self.runtime.teams.stop_all()
+        self.events.put(UIEvent("turn_done", text=answer, data={"cancelled": self.cancel.is_set(), "failed": failed}))
+
+    def read_command(self, text: str) -> str:
+        name = text.strip().lower()
+        runtime = self.runtime
+        commands = {
+            ":help": lambda: ":status 状态 · :tools 工具 · :todos 计划 · :tasks 任务 · :team 队友\n\n"
+                              ":skills 技能 · :memory 记忆 · :mcp 外部服务 · :trace 诊断\n\n"
+                              ":goal <条件> 设置目标 · :goal clear 清除目标 · :clear 清空对话 · :quit 退出",
+            ":status": runtime.status,
+            ":tools": lambda: "\n".join(f"{tool.name}: {tool.description}" for tool in runtime.tools),
+            ":todos": runtime.todos.render,
+            ":tasks": runtime.tasks.render_list,
+            ":team": runtime.summon_report,
+            ":skills": runtime.skills.catalog,
+            ":mcp": lambda: ", ".join(runtime.mcp.names()) or "暂无连接",
+            ":memory": lambda: "\n".join(f"{r['name']}: {r['description']}" for r in runtime.memory.list_records()) or "暂无记忆",
+            ":notes": lambda: "\n".join(runtime.notes) or "暂无记录",
+            ":trace": lambda: runtime.diagnostics.report() if runtime.diagnostics else "诊断已关闭",
+        }
+        return commands[name]() if name in commands else "未知命令，请输入 :help"
+
+    async def drain_events(self) -> None:
+        if self.shutdown.is_set() or not self.query("#chat"):
+            return
+        chat = self.query_one("#chat", VerticalScroll)
+        follow = chat.is_vertical_scroll_end
+        for _ in range(256):
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(event, ApprovalRequest):
+                self.pending.append(event)
+                continue
+            if event.kind == "model_start":
+                self.query_one("#status", Static).update(f"{plain(event.owner)} · 第 {event.data['round']} 轮 · 等待模型输出…")
+            elif event.kind in ("text_delta", "model_end"):
+                pane = self.model_panes.get(event.call_id)
+                if event.text and pane is None:
+                    pane = await self.add_message("Agent" if event.owner == "lead" else event.owner)
+                    self.model_panes[event.call_id] = pane
+                if pane:
+                    pane.text = pane.text + event.text if event.kind == "text_delta" else event.text
+                    self.dirty.add(event.call_id)
+                    if event.kind == "model_end" and event.data.get("stop_reason") == "max_tokens":
+                        pane.heading.update(f"{plain(event.owner)} · 输出截断，尚未确认完成")
+                if event.kind == "model_end" and event.owner == "lead" and not event.data.get("tool_calls"):
+                    self.last_final = event.text
+            elif event.kind == "model_failed":
+                pane = self.model_panes.get(event.call_id)
+                if pane:
+                    pane.heading.update(f"{plain(event.owner)} · 输出未完成")
+                    pane.add_class("notice")
+            elif event.kind == "tool_start":
+                args = event.data.get("arguments", {})
+                summary = next((str(args[field]) for field in ("path", "command", "to", "task_id") if isinstance(args, dict) and field in args), "")
+                title = f"{event.owner} / {event.text}" + (f" · {summary[:100]}" if summary else "")
+                body = Static(plain(repr(args)[:3000]), markup=False)
+                card = Collapsible(body, title=escape("… " + plain(title)), collapsed=not self.show_details, classes="tool")
+                await chat.mount(card)
+                self.tools[event.call_id] = card, body, title
+                self.tool_arguments[event.call_id] = plain(repr(args)[:3000])
+                self.query_one("#status", Static).update(f"{plain(event.owner)} · 正在执行 {plain(event.text)}")
+            elif event.kind == "tool_end" and event.call_id in self.tools:
+                card, body, title = self.tools[event.call_id]
+                ok = event.data["ok"]
+                card.title = escape(f"{'✓' if ok else '×'} {plain(title)} · {event.data['elapsed']:.1f}s")
+                detail = self.tool_arguments[event.call_id] + "\n\n输出：\n" + plain(event.text)
+                if event.data.get("result_chars", len(event.text)) > len(event.text):
+                    detail += f"\n…界面预览已截断；工具实际返回 {event.data['result_chars']} 字符。"
+                body.update(detail)
+                if not ok:
+                    card.add_class("failed")
+                    card.collapsed = False
+            elif event.kind == "turn_done":
+                if event.text and event.text != self.last_final:
+                    await self.add_message("已停止" if event.data.get("cancelled") else "结果", event.text, "notice")
+                self.draining = bool(event.data.get("cancelled") and self.teammates_alive())
+                self.busy = self.draining
+                self.query_one("#status", Static).update("正在等待后台队友停止…" if self.draining else "已停止" if event.data.get("cancelled") else "就绪 · 可以继续输入任务")
+                if self.closing and not self.busy:
+                    self.exit(0)
+        for call_id in tuple(self.dirty):
+            pane = self.model_panes[call_id]
+            await pane.body.update(plain(pane.text))
+        self.dirty.clear()
+        if follow:
+            chat.scroll_end(animate=False)
+        self.show_next_approval()
+        if self.draining and not self.teammates_alive():
+            self.draining = self.busy = False
+            self.query_one("#status", Static).update("已停止 · 可以继续输入")
+            if self.closing:
+                self.exit(0)
+
+    def show_next_approval(self) -> None:
+        if self.current_approval:
+            return
+        while self.pending:
+            request = self.pending.popleft()
+            if request.ready.is_set():
+                continue
+            self.current_approval = request
+
+            def decided(allowed: bool) -> None:
+                request.resolve(allowed and not self.cancel.is_set())
+                self.current_approval = None
+
+            self.push_screen(ApprovalScreen(request), decided)
+            break
+
+    def teammates_alive(self) -> bool:
+        return bool(self.runtime.teams and any(t.alive for t in list(self.runtime.teams.teammates.values())))
+
+    def update_sidebar(self) -> None:
+        if self.shutdown.is_set() or not self.query("#session"):
+            return
+        runtime = self.runtime
+        features = f"团队 {'开启' if runtime.teams else '关闭'}\n记忆 {'开启' if runtime.memory.enabled else '关闭'}"
+        if self.busy and self.started_at is not None:
+            features += f"\n本次耗时 {time.monotonic() - self.started_at:.1f} 秒"
+        if runtime.diagnostics:
+            summary = runtime.diagnostics.summary()
+            counts = summary["counts"]
+            tokens = summary["token_totals"]
+            features += f"\n\n模型调用 {counts.get('model_calls', 0)}\n工具调用 {counts.get('tool_calls', 0)}\n工具错误 {counts.get('tool_errors', 0)}"
+            features += f"\n\n输入 token {tokens['input_tokens'] if tokens['input_tokens'] is not None else '未知'}\n输出 token {tokens['output_tokens'] if tokens['output_tokens'] is not None else '未知'}"
+        self.query_one("#session", Static).update(features)
+        roster = runtime.teams.roster() if runtime.teams else "后台队友未开启\n使用 --teams 开启"
+        self.query_one("#team", Static).update(plain(roster))
+        self.query_one("#sidebar").display = self.size.width >= 100
+
+    def move_history(self, direction: int) -> None:
+        prompt = self.query_one("#prompt", Prompt)
+        if self.history_index == len(self.history):
+            self.draft = prompt.text
+        self.history_index = max(0, min(len(self.history), self.history_index + direction))
+        prompt.load_text(self.history[self.history_index] if self.history_index < len(self.history) else self.draft)
+        prompt.move_cursor(prompt.document.end)
+
+    def action_focus_prompt(self) -> None:
+        self.query_one("#prompt", Prompt).focus()
+
+    def action_stop(self) -> None:
+        if not self.busy and not self.teammates_alive():
+            self.query_one("#prompt", Prompt).clear()
+            return
+        if not self.busy:
+            self.draining = self.busy = True
+        self.cancel.set()
+        for request in list(self.pending) + ([self.current_approval] if self.current_approval else []):
+            request.resolve(False)
+        if self.current_approval and isinstance(self.screen, ApprovalScreen):
+            self.screen.dismiss(False)
+        if self.runtime.teams:
+            for teammate in list(self.runtime.teams.teammates.values()):
+                teammate.stop()
+        self.query_one("#status", Static).update("正在停止；等待当前网络或命令操作返回…")
+
+    def action_request_quit(self) -> None:
+        if self.busy or self.teammates_alive():
+            self.closing = True
+            self.action_stop()
+        else:
+            self.exit(0)
+
+    def on_unmount(self) -> None:
+        self.shutdown.set()
+        self.cancel.set()
+        for request in list(self.pending) + ([self.current_approval] if self.current_approval else []):
+            request.resolve(False)
+
+
+def run_tui(runtime: Runtime, *, initial_request: str = "", show_details: bool = False) -> int:
+    return HarnessApp(runtime, initial_request=initial_request, show_details=show_details).run() or 0

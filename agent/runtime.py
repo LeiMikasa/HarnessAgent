@@ -58,6 +58,7 @@ from .teams import PLAN_GATED_TOOLS, TeamManager
 from .todo import TodoList, register_todo_tools
 from .tools.basic import register_basic_tools, shell_hint
 from .tools.registry import ToolContext, ToolRegistry
+from .ui_events import UIEvent
 
 MASKED_TOOL_OUTPUT_WARN = 100_000
 
@@ -90,12 +91,15 @@ class Runtime:
         on_progress: Callable[[str], None] | None = None,
         goal_evaluator: GoalEvaluator | None = None,
         diagnostics_enabled: bool = True,
+        on_ui_event: Callable[[UIEvent], None] | None = None,
     ):
         self.settings = settings
         self.llm = llm
         self.verbose = verbose
         self.on_event = on_event
         self.on_progress = on_progress
+        self.on_ui_event = on_ui_event
+        self.cancel_event = None
         self.stats = RuntimeStats()
         self.notes: list[str] = []
 
@@ -463,6 +467,10 @@ class Runtime:
         """The callable teammates use to run their own turns."""
         if self.diagnostics:
             ctx.extra["diagnostics"] = self.diagnostics
+        if self.on_ui_event:
+            ctx.extra["ui_events"] = self.on_ui_event
+        if self.cancel_event is not None:
+            ctx.extra["cancel_event"] = self.cancel_event
         result = run_loop(
             llm=llm,
             registry=registry,
@@ -539,6 +547,10 @@ class Runtime:
     def run_turn(self, messages: list[dict] | None = None) -> LoopResult:
         """Run the loop to completion for the current messages."""
         target = self.messages if messages is None else messages
+        if self.on_ui_event:
+            self.lead_ctx.extra["ui_events"] = self.on_ui_event
+        if self.cancel_event is not None:
+            self.lead_ctx.extra["cancel_event"] = self.cancel_event
         result = run_loop(
             llm=self.llm,
             registry=self.tools,
@@ -621,6 +633,8 @@ class Runtime:
         deadline = time.monotonic() + max(0.0, timeout)
         answer = initial_answer
         while True:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                return answer
             events = self.teams.consume_lead_inbox()
             if events:
                 self._inject(self.messages, self.teams.format_events(events))

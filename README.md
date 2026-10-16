@@ -131,6 +131,7 @@ cp .env.example .env        # 填入 ANTHROPIC_API_KEY
 
 python preflight.py --tools    # 先验证供应商：模型 id、连通性、工具调用
 python -m agent                                     # 轻量交互式：团队、长期记忆默认关闭
+python -m agent --tui                               # 新终端界面：固定输入区、流式回答、工具卡片、审批弹窗
 python -m agent --full                              # 开启团队与长期记忆
 python -m agent --teams                             # 只开启团队
 python -m agent --memory                            # 只开启长期记忆
@@ -155,6 +156,8 @@ CLI 默认采用轻量启动，避免小任务进入团队协调流程或产生�
 `--no-trace` 可关闭。此日志不保存参数正文、工具结果正文、回答或模型思考；
 `--verbose` 的终端输出是另一套详细日志。重复观察不拦截工具，不等于无效操作判定。
 参见 [运行轮次诊断](docs/运行轮次诊断.md)。
+
+终端界面使用 `--tui` 开启，可与 `--teams`、`--full` 组合。Enter 发送、Ctrl+J 换行、Ctrl+P/N 输入历史，Ctrl+C 请求停止，Ctrl+Q 退出。详见 [终端界面与流式输出](docs/终端界面与流式输出.md)。
 
 默认指向 DeepSeek 的 Anthropic 兼容端点。**换供应商只改 `.env`，不改代码**：
 

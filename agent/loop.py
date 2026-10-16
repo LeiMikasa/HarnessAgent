@@ -29,6 +29,7 @@ differ only in the arguments they pass.
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Callable
 
@@ -40,6 +41,7 @@ from .tools.registry import ToolContext, ToolRegistry
 from .tools.feedback import CommandFeedback
 from .tools.result import ToolResult
 from .tools.recovery import ToolRecovery
+from .ui_events import UIEvent
 
 MAX_REACTIVE_RETRIES = 1
 MAX_INCOMPLETE_RETRIES = 2
@@ -157,6 +159,22 @@ def run_loop(
     result = LoopResult() # 创建默认结果对象
     recovery = ToolRecovery()
     ctx.extra["tool_attempts"] = recovery.events
+    cancel_event = ctx.extra.get("cancel_event")
+
+    def cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    def cancel_result() -> LoopResult:
+        result.stop_reason = "cancelled"
+        result.error = "Stopped by user; already completed tool effects are retained."
+        result.text = result.error
+        ctx.extra.pop(COMPACT_FLAG, None)
+        return result
+
+    def ui(kind: str, call_id: str = "", text: str = "", **data) -> None:
+        sink = ctx.extra.get("ui_events")
+        if sink:
+            sink(UIEvent(kind, ctx.owner, call_id, text, data))
 
     def emit(text: str) -> None:
         if on_event and text:
@@ -167,6 +185,8 @@ def run_loop(
             on_progress(text)
 
     for turn in range(1, max(1, max_turns) + 1):
+        if cancelled():
+            return cancel_result()
         result.turns = turn
         trace = ctx.extra.get("diagnostics")
         if isinstance(trace, RunTrace):
@@ -198,15 +218,25 @@ def run_loop(
 
         # -- the model call, with one reactive retry ------------------------
         progress(f"[model] round {turn}: waiting for response")
+        model_call_id = uuid.uuid4().hex
+        ui("model_start", model_call_id, round=turn)
         try:
+            stream_args = {}
+            if ctx.extra.get("ui_events") and getattr(llm, "supports_text_stream", False):
+                stream_args = {"on_text": lambda text: ui("text_delta", model_call_id, text),
+                               "should_cancel": cancelled}
             response = llm.create(
                 system=system_prompt,
                 messages=messages,
                 tools=tools,
                 max_tokens=ctx.settings.max_tokens,
+                **stream_args,
             )
             reactive_retries = 0
         except Exception as exc:  # noqa: BLE001
+            ui("model_failed", model_call_id, type(exc).__name__, cancelled=cancelled())
+            if cancelled():
+                return cancel_result()
             if (
                 compactor is not None      # 有压缩器
                 and is_prompt_too_long(exc)  # 上下文太长
@@ -223,6 +253,10 @@ def run_loop(
             progress(f"[model] round {turn}: request failed")
             return result
 
+        ui("model_end", model_call_id, extract_text(response.content), stop_reason=response.stop_reason,
+           tool_calls=len(tool_use_blocks(response.content)))
+        if cancelled():
+            return cancel_result()
         calls = tool_use_blocks(response.content) # 获取工具的调用的字典列表
         final_text = extract_text(response.content).strip()
         provider_stop = response.stop_reason or "unknown"
@@ -318,13 +352,21 @@ def run_loop(
         results = []
         command_notes = []
         for block in calls:
+            if cancelled():
+                skipped = ToolResult.failure("CANCELLED", "Not executed: user requested stop.")
+                results.append(make_tool_result(block.get("id", ""), skipped.model_content(), is_error=True))
+                continue
             name = block.get("name", "")
             # Tool names originate in the model response.  Keep terminal
             # progress free of control characters and unbounded labels.
             label = "".join(char for char in str(name) if char.isprintable())[:80] or "(unnamed)"
             progress(f"[tool] {label}: running")
             started = time.monotonic()
+            ui_call_id = uuid.uuid4().hex
+            ui("tool_start", ui_call_id, label, arguments=block.get("input", {}), workdir=str(ctx.workdir))
             output = execute_tool(block, registry, ctx, hook_registry, recovery)
+            ui("tool_end", ui_call_id, str(output)[:8000], ok=output.ok,
+               error_code=output.error_code, elapsed=time.monotonic() - started, result_chars=len(output))
             tool = registry.get(name) if isinstance(name, str) else None
             advice = command_feedback.observe(name, block.get("input", {}), output, tool)
             if advice:
@@ -341,6 +383,8 @@ def run_loop(
         # One bounded host-authored note for the next model request. Do not add
         # conversational turns, replay commands, or force completion.
         command_note = max(command_notes, key=len, default="")
+        if cancelled():
+            return cancel_result()
 
         # -- the model asked for room: compact now that the batch is safe ---
         # Deferred on purpose.  A `write_file` in this same batch must be
