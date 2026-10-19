@@ -93,6 +93,7 @@ def build_system_prompt(
     team_worktrees_enabled: bool = True,
     todo_summary: str = "", # 当前 todo 计划摘要，默认空
     extra: list[str] | None = None, # 额外追加的段落，默认无
+    sandbox_enabled: bool = False,
 ) -> str:
     """Assemble the full system prompt."""
     sections: list[str] = [IDENTITY.format(workdir=workdir), EXECUTION_EFFICIENCY] # 身份
@@ -100,7 +101,7 @@ def build_system_prompt(
     environment = [
         f"Workspace root: {workdir}",
         f"Shell: {shell}",
-        shell_guidance(),
+        shell_guidance(sandbox_enabled=sandbox_enabled),
         "All file paths you pass to tools are resolved relative to the workspace. "
         "Paths outside it require explicit approval.",
     ]

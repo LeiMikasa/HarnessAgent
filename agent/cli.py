@@ -68,7 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--demo", action="store_true", help="Run a scripted offline demo and exit.")
     parser.add_argument("--status", action="store_true", help="Print configuration and exit.")
     parser.add_argument("--tui", action="store_true", help="Open the interactive terminal UI with streamed text.")
-
+    parser.add_argument("--sandbox",action="store_true",help="Run shell commands in a Docker sandbox")
     parser.add_argument(
         "--approval",
         choices=["ask", "allow", "deny"],
@@ -323,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
         verbose=args.verbose and not args.tui,
         on_event=None if args.tui else event_sink,
         on_progress=None if args.tui else progress_sink,
+        sandbox_enabled=args.sandbox,
+
     )
 
     try:
@@ -351,6 +353,9 @@ def main(argv: list[str] | None = None) -> int:
             _print(answer)
             return 0
 
+        if args.sandbox and teams_enabled:
+            _print("当前沙箱版本暂不支持团队模式，请关闭")
+            return 2
         return _repl(runtime)
     finally:
         runtime.close()

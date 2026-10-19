@@ -7,9 +7,9 @@
     glob        find files by pattern
     grep        search file contents
 
-Everything is workspace-scoped.  `safe_path` is the single choke point: it
-resolves a caller-supplied path and refuses to leave the workspace unless the
-permission pipeline explicitly approved an escape for this one call.
+In host mode, `safe_path` contains file paths unless the permission pipeline
+approved an escape for this one call. In Docker mode, handlers delegate to the
+sandbox, whose file tools independently contain paths within /workspace.
 """
 
 from __future__ import annotations
@@ -87,22 +87,49 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
 
     child_env = dict(os.environ)
     child_env.setdefault("PYTHONIOENCODING", "utf-8")
+    # try:
+    #     result = subprocess.run(
+    #         command,
+    #         shell=True,
+    #         cwd=str(ctx.workdir),
+    #         capture_output=True, # 捕获 stdout+stderr
+    #         env=child_env,
+    #         timeout=timeout,
+    #     )
+    # except subprocess.TimeoutExpired:
+    #     return tool_error("TIMEOUT", f"Timeout ({timeout:g}s); command may have produced side effects. "
+    #                       "Inspect the actual state before issuing another command.",
+    #                       action="inspect_state", execution_status="unknown")
+    # except (FileNotFoundError, OSError) as exc:
+    #     return ToolResult.from_exception(exc)
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(ctx.workdir),
-            capture_output=True, # 捕获 stdout+stderr
-            env=child_env,
-            timeout=timeout,
+        runtime=ctx.runtime
+        if (
+            runtime is not None
+            and getattr(runtime, "sandbox_enabled",False)
+        ):
+            # 沙箱模式：在容器里执行
+            sandbox=runtime.get_sandbox(ctx.workdir)
+            result=sandbox.execute(command,timeout=timeout)
+        else:
+            result=subprocess.run(
+                command,
+                shell=True,
+                cwd=str(ctx.workdir),
+                capture_output=True,
+                env=child_env,
+                timeout=timeout
+            )
+    except (subprocess.TimeoutExpired, TimeoutError):
+        return tool_error(
+            "TIMEOUT",
+            f"Timeout ({timeout:g}s); inspect actual state before retrying.",
+            action="inspect_state",
+            execution_status="unknown",
         )
-    except subprocess.TimeoutExpired:
-        return tool_error("TIMEOUT", f"Timeout ({timeout:g}s); command may have produced side effects. "
-                          "Inspect the actual state before issuing another command.",
-                          action="inspect_state", execution_status="unknown")
-    except (FileNotFoundError, OSError) as exc:
-        return ToolResult.from_exception(exc)
 
+    except (OSError, RuntimeError, ValueError) as exc:
+        return ToolResult.from_exception(exc)
     stdout = decode_shell_output(result.stdout).strip()
     stderr = decode_shell_output(result.stderr).strip()
     if result.returncode:
@@ -125,6 +152,14 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
 
 
 def run_read_file(args: dict, ctx: ToolContext) -> str:
+
+    runtime=ctx.runtime
+    if (
+        runtime is not None
+        and getattr(runtime,"sandbox_enabled",False)
+    ):
+        sandbox=runtime.get_sandbox(ctx.workdir)
+        return sandbox.read_file(args)
     path = safe_path(ctx, args.get("path", ""))
     try:
         path.stat()
@@ -170,6 +205,14 @@ def run_read_file(args: dict, ctx: ToolContext) -> str:
 
 
 def run_write_file(args: dict, ctx: ToolContext) -> str:
+    runtime=ctx.runtime
+    if (
+        runtime is not None
+        and getattr(runtime,"sandbox_enabled",False)
+    ):
+        sandbox=runtime.get_sandbox(ctx.workdir)
+        return sandbox.write_file(args)
+
     path = safe_path(ctx, args.get("path", ""))
     content = args.get("content", "")
     if not isinstance(content, str):
@@ -188,6 +231,10 @@ def run_write_file(args: dict, ctx: ToolContext) -> str:
 
 
 def run_edit_file(args: dict, ctx: ToolContext) -> str:
+    runtime = ctx.runtime
+    if runtime is not None and getattr(runtime, "sandbox_enabled", False):
+        return runtime.get_sandbox(ctx.workdir).edit_file(args)
+
     path = safe_path(ctx, args.get("path", ""))
     old_text = args.get("old_text")
     new_text = args.get("new_text")
@@ -231,6 +278,10 @@ def run_edit_file(args: dict, ctx: ToolContext) -> str:
 
 
 def run_glob(args: dict, ctx: ToolContext) -> str:
+    runtime = ctx.runtime
+    if runtime is not None and getattr(runtime, "sandbox_enabled", False):
+        return runtime.get_sandbox(ctx.workdir).glob(args)
+
     pattern = args.get("pattern", "")
     if not isinstance(pattern, str) or not pattern.strip():
         return tool_error("INVALID_ARGUMENT", "pattern is required", field="pattern", action="correct_arguments")
@@ -287,6 +338,10 @@ def _grep_preview(line: str, match: re.Match[str]) -> str:
 
 
 def run_grep(args: dict, ctx: ToolContext) -> str:
+    runtime = ctx.runtime
+    if runtime is not None and getattr(runtime, "sandbox_enabled", False):
+        return runtime.get_sandbox(ctx.workdir).grep(args)
+
     pattern = args.get("pattern", "")
     if not isinstance(pattern, str) or not pattern:
         return tool_error("INVALID_ARGUMENT", "pattern is required", field="pattern", action="correct_arguments")
@@ -407,11 +462,17 @@ _GREP_SCHEMA = {
 }
 
 
-def register_basic_tools(registry: ToolRegistry) -> ToolRegistry:
+def register_basic_tools(registry: ToolRegistry,*,sandbox_enabled: bool=False) -> ToolRegistry:
     """Add the six base tools to `registry`."""
     for schema in (_BASH_SCHEMA, _READ_SCHEMA, _WRITE_SCHEMA, _EDIT_SCHEMA, _GLOB_SCHEMA, _GREP_SCHEMA):
         schema["additionalProperties"] = False
-    registry.add("bash", "Run a shell command in the workspace. " + shell_guidance(), _BASH_SCHEMA, run_bash)
+    registry.add(
+        "bash",
+        "Run a shell command in the workspace. "
+        + shell_guidance(sandbox_enabled=sandbox_enabled),
+        _BASH_SCHEMA,
+        run_bash,
+    )
     registry.add("read_file", "Read a file's contents.", _READ_SCHEMA, run_read_file, read_only=True, retry_safe=True)
     registry.add("write_file", "Create or overwrite a file.", _WRITE_SCHEMA, run_write_file)
     registry.add("edit_file", "Replace exact text in a file.", _EDIT_SCHEMA, run_edit_file)

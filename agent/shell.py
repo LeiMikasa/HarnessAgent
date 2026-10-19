@@ -13,7 +13,21 @@ def shell_name() -> str:
     return "/bin/sh"
 
 
-def shell_guidance() -> str:
+def shell_guidance(*,sandbox_enabled: bool=False) -> str:
+    if sandbox_enabled:
+          return (
+            "The bash tool executes commands in a Linux Docker container "
+            "through /bin/bash. Its working directory is /workspace, "
+            "which is the mounted host project directory. "
+            "Use Linux Bash syntax and container paths in shell commands. "
+            "Python is available as python3. "
+            "Network access is disabled. "
+            "Each call starts a new shell in /workspace; "
+            "cd and exported variables do not persist across calls. "
+            "Other file tools currently operate on the host workspace: "
+            "pass workspace-relative paths to those tools, "
+            "not container-absolute /workspace paths."
+        )
     platform = {"win32": "Windows", "darwin": "macOS"}.get(sys.platform, sys.platform)
     description = f"Operating system: {platform}. The bash tool runs commands through {shell_name()}. "
     if sys.platform == "win32":
@@ -26,6 +40,7 @@ def shell_guidance() -> str:
         "For complex JavaScript or Python diagnostics, write a short script in the workspace and "
         "run it instead of nesting multiple quoting layers in node -e or python -c."
     )
+
 
 
 def decode_shell_output(value: bytes | str | None) -> str:

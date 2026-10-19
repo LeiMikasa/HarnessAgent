@@ -203,6 +203,9 @@ class HarnessApp(App[int]):
         self.set_interval(0.05, self.drain_events)
         self.set_interval(0.5, self.update_sidebar)
         self.query_one("#prompt", Prompt).focus()
+        # Follow layout growth, including delayed Markdown rendering. Textual
+        # releases this anchor when the user scrolls and restores it at bottom.
+        self.query_one("#chat", VerticalScroll).anchor()
         self.update_sidebar()
         await self.add_message("开始工作", "直接输入任务即可。工具结果可以点击展开；审批会在确认窗口中显示。", "notice")
         if self.initial_request:
@@ -258,11 +261,15 @@ class HarnessApp(App[int]):
             self.tools.clear()
             self.tool_arguments.clear()
             self.query_one("#prompt", Prompt).clear()
+            self.query_one("#chat", VerticalScroll).scroll_end(animate=False)
             return
         self.history.append(text)
         self.history_index = len(self.history)
         self.query_one("#prompt", Prompt).clear()
         await self.add_message("你", text, "user")
+        # Sending a new request explicitly resumes following, even after the
+        # user scrolled up. Deferred scrolling waits for the new message layout.
+        self.query_one("#chat", VerticalScroll).scroll_end(animate=False)
         self.busy, self.last_final = True, ""
         self.started_at = time.monotonic()
         self.cancel = threading.Event()
@@ -312,7 +319,6 @@ class HarnessApp(App[int]):
         if self.shutdown.is_set() or not self.query("#chat"):
             return
         chat = self.query_one("#chat", VerticalScroll)
-        follow = chat.is_vertical_scroll_end
         for _ in range(256):
             try:
                 event = self.events.get_nowait()
@@ -373,8 +379,6 @@ class HarnessApp(App[int]):
             pane = self.model_panes[call_id]
             await pane.body.update(plain(pane.text))
         self.dirty.clear()
-        if follow:
-            chat.scroll_end(animate=False)
         self.show_next_approval()
         if self.draining and not self.teammates_alive():
             self.draining = self.busy = False

@@ -1,490 +1,371 @@
 # HarnessAgent
 
-一个**用 Python 3 从零搭起来的编码 Agent 外壳（harness）**，设计参照
-[`learn-claude-code`](https://github.com/shareAI-lab/learn-claude-code) 的
-s01–s10、s13、s14 章，把它们从"每章一个独立文件"重构成一个**可运行的模块化工程**。
+用 Python 实现的模块化编码 Agent：模型负责决定下一步，运行时负责工具执行、权限检查、上下文管理、任务协作和运行记录。
 
-核心理念只有一句话：
+项目参考 [learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 的 Agent 构建思路，提供普通 CLI、Textual 终端界面和可选的 Docker 工具沙箱。支持 DeepSeek、Anthropic，以及无需 API 的离线 Mock 模式。
 
-> **能动性来自模型，外壳（harness）负责给能动性一个落脚的地方。**
+## 功能概览
 
-模型是司机，外壳是车。这个仓库造的是车。
+| 能力 | 当前实现 |
+|---|---|
+| Agent Loop | 模型调用 → 工具执行 → 结果回传；完整回答经过 Stop Hook 后结束 |
+| 基础工具 | `bash`、`read_file`、`write_file`、`edit_file`、`glob`、`grep` |
+| 工具恢复 | JSON Schema 校验、结构化错误、有限自动重试、模型参数修正、未知写入状态检查 |
+| 权限控制 | 硬拒绝列表、风险规则、人工批准或 allow/deny 策略 |
+| Docker 沙箱 | 六个基础工具在容器内执行；挂载指定工作区，使用 bridge 网络 |
+| 上下文管理 | 五层压缩、历史归档、工具结果落盘、上下文超限后的应急恢复 |
+| Skills | 启动加载技能目录，按需读取 `SKILL.md` 正文 |
+| 子 Agent | 独立对话完成一次委派，将结果返回主 Agent |
+| 团队协作 | 后台线程队友、共享任务板、消息信箱、计划审核、Git worktree |
+| 长期记忆 | 选择、提取与整合；区分长期信息和当前任务临时要求 |
+| MCP | 连接外部工具，刷新后续模型调用可见的工具池 |
+| 终端界面 | 流式回答、工具卡片、权限弹窗、输入历史与队友状态 |
+| 诊断与评测 | 调用计数、供应商 token 用量、运行轨迹、独立验收与压缩对照 |
 
-工具执行现已增加统一 JSON Schema 校验、结构化错误和按错误类型恢复。参数错误由模型修正；只读且由宿主明确允许的工具遇到暂时性故障，最多自动重试两次；写入结果未知时先检查文件状态。使用现有环境时执行 `python -m pip install -r requirements.txt` 安装新增的 `jsonschema` 依赖。实现、预算和边界见 [工具错误恢复说明](docs/工具错误恢复说明.md)。
+普通 CLI 默认关闭团队和长期记忆，保留上下文压缩、权限检查和诊断记录。需要时通过启动参数开启。
 
-命令执行会向模型说明实际 Shell，优先正确解码 UTF-8 中文输出；失败时分开显示退出码、stdout 和 stderr，并在下一轮提供有界诊断提醒。相同命令和可见错误重复出现时提醒更换诊断方式，正常修复仍可继续。见 [命令执行与失败诊断](docs/命令执行与失败诊断.md)。
+## 快速开始
 
----
+以下命令以 Windows PowerShell 为例，建议使用 Python 3.11 或更新版本。在项目根目录执行：
 
-## 1. 它长什么样
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-```
-                    THE AGENT PATTERN
-                    =================
-
-    User --> messages[] --> LLM --> response
-                                      |
-                              contains tool_use block?
-                           /                          \
-                         yes                           no
-                          |                             |
-                    execute tools                    return text
-                    append results
-                    loop back -----------------> messages[]
-```
-
-这个循环**永远不变**。整份代码里只有 `agent/loop.py` 那一处是 **agent 循环**
-（"调模型 → 执行工具 → 回灌结果"）—— 所有 18 个机制都是围绕它的四种扩展点挂上去的，
-没有一个是往循环里塞 `if`。
-
-（顺便说清楚：代码里还有另外 6 处 `while`，但都不是 agent 循环 ——
-`cli.py` 的 REPL 读输入、`teams.py` 的信箱等待和队友工作循环、
-`context.py` 的配对扫描、`mcp.py` 等 JSON-RPC 响应、`tasks.py` 的依赖图遍历、
-`runtime.py` 等队友。别把它们和 agent 循环搞混。）
-
-```
-    UserPromptSubmit   用户输入到达，还没进模型
-    PreToolUse         工具即将执行 —— 返回字符串可以否决这次调用
-    PostToolUse        工具执行完毕 —— 只能观察
-    Stop               模型没要工具、想停下了 —— 返回字符串可以强制它继续
+# 已有 .env 时保留原配置
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
----
+### 先跑免费演示
 
-## 2. 与 learn-claude-code 的对应关系
-
-| 课程章节 | 机制 | 本工程实现 |
-|---|---|---|
-| s01 | Agent Loop | `agent/loop.py` |
-| s02 | Tool Use | `agent/tools/registry.py`、`agent/tools/basic.py` |
-| s03 | Permission | `agent/permissions.py` |
-| s04 | Hooks | `agent/events.py` |
-| s05 | TodoWrite | `agent/todo.py` |
-| s06 | Subagent | `agent/subagent.py` |
-| s07 | Skill Loading | `agent/skills.py` |
-| s08 | Context Compact | `agent/context.py` |
-| s09 | Memory | `agent/memory.py` |
-| s10 | Task System | `agent/tasks.py` |
-| s13 | Agent Teams | `agent/teams.py`、`agent/team_tools.py` |
-| s14 | MCP Plugin | `agent/mcp.py` |
-| s17 | Goal Loop | `agent/goal.py`、`agent/runtime.py` |
-| — | 系统提示词组装 | `agent/prompt.py` |
-| — | 全部接线 | `agent/runtime.py` |
-| — | 终端入口 | `agent/cli.py` |
-| — | 模型接入（含离线 mock） | `agent/llm.py` |
-
-尚未接入 **s11（后台任务）、s12（定时任务）、s15/s16**。
-
-Goal Loop 使用 `:goal <验收条件>`（也支持 `/goal <验收条件>`）设定目标并立即执行。主 Agent 想结束时，独立、无工具的模型调用根据近期对话和工具结果判断目标是否达成；未达成会带着原因继续，同一目标每次请求最多自动续轮 8 次。`:goal` 查看状态，`:goal clear` 取消，新的条件可替换旧条件。评估异常或达到续轮上限会保留目标并返回控制权；队友还在执行关联任务时暂缓判断。目标仅保存在当前 Runtime 会话内。
-离线 `mock` 模式没有真实判断能力；测试通过注入确定性的评估器验证目标循环。
-
-模型仅返回思考、没有正文和工具调用时，不会按正常完成处理：最多自动恢复两次，仍不完整则明确报错。输出因 `max_tokens` 截断的正文会尝试续写；包含工具调用的截断响应会整批丢弃，不执行其中任何工具，也不加入历史，然后提示模型重新生成一个较小的完整调用。之前已执行的工具结果保留。不完整响应共用最多两次自动重试，恢复也受 `AGENT_MAX_TURNS` 总轮数限制。`--verbose` 会显示响应结束原因、重试进度、正文长度，以及带参数名和结果长度的工具摘要。
-
----
-
-## 3. 目录结构
-
-```
-HarnessAgent/
-  agent/
-    loop.py          唯一的 agent 循环
-    llm.py           模型接入：Anthropic 兼容端点 + 离线 MockLLM
-    events.py        Hooks：四个扩展点
-    permissions.py   三道闸门：deny list / 规则 / 用户批准
-    prompt.py        系统提示词组装（每次调用前重建）
-    runtime.py       把上面所有东西接在一起
-    cli.py           终端入口（含 :命令）
-
-    todo.py          s05 计划清单
-    subagent.py      s06 子 agent（独立上下文）
-    skills.py        s07 按需加载知识
-    context.py       s08 五级上下文压缩
-    memory.py        s09 记忆：选择 / 提取 / 整合
-    tasks.py         s10 落盘的任务依赖图
-    teams.py         s13 队友、信箱、协议、任务绑定 worktree
-    team_tools.py    s13 团队工具
-    mcp.py           s14 外部能力路由（含 stdio JSON-RPC 客户端）
-    goal.py          s17 独立目标评估与自动续轮
-
-    tools/
-      registry.py    Tool / ToolContext / ToolRegistry
-      basic.py       bash read_file write_file edit_file glob grep
-
-  skills/            SKILL.md 知识包（启动只读 frontmatter）
-  tests/             离线测试，不需要 API key
-
-  docs/
-    loop-逐行讲解.md  agent/loop.py 的逐行导读（从这里开始读源码）
+```powershell
+.\.venv\Scripts\python.exe -m agent --mock --demo --workdir ".scratch\quickstart"
 ```
 
-> **想读源码？先看 [`docs/loop-逐行讲解.md`](docs/loop-逐行讲解.md)。**
-> 它把 `agent/loop.py` 181 行逐行讲完，包括每个设计取舍背后的问题。
-> 读懂那一个文件，剩下的都是"机制挂在哪"的问题。
+演示使用预设的 Mock 响应，在指定工作区创建并验证 `greeting.py`，不调用真实模型。Mock 用于验证运行流程，不具备真实模型的推理能力。
 
----
+### 配置真实模型
 
-## 4. 快速开始
+编辑 `.env`，例如：
 
-```sh
-pip install -r requirements.txt
-cp .env.example .env        # 填入 ANTHROPIC_API_KEY
-
-python preflight.py --tools    # 先验证供应商：模型 id、连通性、工具调用
-python -m agent                                     # 轻量交互式：团队、长期记忆默认关闭
-python -m agent --tui                               # 新终端界面：固定输入区、流式回答、工具卡片、审批弹窗
-python -m agent --full                              # 开启团队与长期记忆
-python -m agent --teams                             # 只开启团队
-python -m agent --memory                            # 只开启长期记忆
-python -m agent "修复失败的测试"                      # 单次任务
-python -m agent --quiet "修复失败的测试"              # 只输出最终答案
-python -m agent --verbose                           # 显示详细事件日志
-python -m agent --mock --demo                       # 不需要 key 的离线自检
-python -m agent --status                            # 打印解析后的配置
-```
-
-默认会在终端实时显示模型轮次和工具执行状态；进度写到标准错误输出，
-单次任务的标准输出仍只有最终答案。`--quiet` 关闭进度，`--verbose` 额外显示
-工具结果预览与诊断事件。普通进度不会包含模型内部思考、工具参数或工具输出；
-详细日志可能包含工具参数和结果片段，请勿把它直接分享给不可信的人。
-
-CLI 默认采用轻量启动，避免小任务进入团队协调流程或产生记忆选择、提取调用。
-`--full` 恢复团队与记忆；`--full --no-memory` 等显式关闭参数优先。
-上下文压缩和权限检查仍然启用，原有 `Runtime` Python API 的功能默认值不变。
-
-默认将完整的轮次与调用元数据写入 `.agent/runs/<运行编号>/events.jsonl`，并生成
-`summary.json`。交互中输入 `:trace` 查看调用分类、错误、重复读取观察和日志路径；
-`--no-trace` 可关闭。此日志不保存参数正文、工具结果正文、回答或模型思考；
-`--verbose` 的终端输出是另一套详细日志。重复观察不拦截工具，不等于无效操作判定。
-参见 [运行轮次诊断](docs/运行轮次诊断.md)。
-
-终端界面使用 `--tui` 开启，可与 `--teams`、`--full` 组合。Enter 发送、Ctrl+J 换行、Ctrl+P/N 输入历史，Ctrl+C 请求停止，Ctrl+Q 退出。详见 [终端界面与流式输出](docs/终端界面与流式输出.md)。
-
-默认指向 DeepSeek 的 Anthropic 兼容端点。**换供应商只改 `.env`，不改代码**：
-
-```ini
-# DeepSeek（默认）
+```dotenv
 AGENT_PROVIDER=deepseek
+ANTHROPIC_API_KEY=填写你的供应商密钥
 ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-MODEL_ID=deepseek-chat
-
-# Anthropic 官方
-AGENT_PROVIDER=anthropic
-MODEL_ID=claude-sonnet-4-6
-
-# 离线
-AGENT_PROVIDER=mock
+MODEL_ID=deepseek-v4-flash
+AGENT_APPROVAL=ask
 ```
 
-### 为什么先跑 `preflight.py`
+这里的模型名称与项目内置预设一致；实际可用名称取决于供应商及账号。查看解析后的配置不会调用模型：
 
-离线测试证明的是**外壳的机械结构**对不对。它证明不了**供应商这条路径**能跑 ——
-那需要真 key 和真端点。`preflight.py` 一条命令补上这个缺口：
-
-```
-resolved configuration          解析后的配置（key 打码）
-probing model ids               逐个试模型 id，打印每个的**原始报错**
-tool-calling round trip         工具调用一次完整往返（外壳真正依赖的东西）
+```powershell
+.\.venv\Scripts\python.exe -m agent --status
 ```
 
-它会明确区分三种失败，因为**它们的排查方向完全不同**：
+需要检查真实接口和工具调用往返时运行：
 
-| 现象 | 含义 |
+```powershell
+.\.venv\Scripts\python.exe preflight.py --tools
+```
+
+`preflight.py` 会发送真实模型请求并消耗 API 额度。
+
+切换到 Anthropic 时设置 `AGENT_PROVIDER=anthropic`、对应的 `MODEL_ID` 和密钥，并清空 `ANTHROPIC_BASE_URL`，让 SDK 使用默认端点。项目通过 Anthropic SDK 访问官方或兼容接口，不直接接收任意 OpenAI 格式接口。
+
+### 指定开发目录启动
+
+工作区是 Agent 要修改的项目目录，不必是 HarnessAgent 自身目录。
+
+```powershell
+# 普通交互模式
+.\.venv\Scripts\python.exe -m agent --workdir "D:\btest"
+
+# 终端界面
+.\.venv\Scripts\python.exe -m agent --tui --workdir "D:\btest"
+
+# 执行一个任务后退出
+.\.venv\Scripts\python.exe -m agent --workdir "D:\btest" "检查项目并修复失败的测试"
+```
+
+## 启动选项与交互命令
+
+| 参数 | 作用 |
 |---|---|
-| 网络 / 连接错误 | `base_url` 写错，或没有网络 |
-| 400 参数错误 | 请求体结构和端点不匹配 |
-| 401 认证失败 | 端点通了、请求格式对了，**只是 key 不对** |
+| `--workdir PATH` | 指定目标项目目录 |
+| `--tui` | 使用 Textual 界面，流式显示模型回答 |
+| `--sandbox` | 将六个基础工具交给 Docker 执行 |
+| `--teams` | 开启后台队友和团队工具 |
+| `--memory` | 开启长期记忆 |
+| `--full` | 同时开启团队和长期记忆 |
+| `--no-teams`、`--no-memory` | 显式关闭对应功能，优先于 `--full` |
+| `--provider`、`--model`、`--base-url` | 覆盖模型连接配置 |
+| `--env-file PATH` | 指定配置文件 |
+| `--approval ask\|allow\|deny` | 对需要批准的操作采用对应策略 |
+| `--verbose` | 显示详细事件和工具结果预览 |
+| `--quiet` | 关闭进度，只输出最终答案；不能与 `--tui` 同用 |
+| `--no-trace` | 关闭运行诊断记录 |
+| `--no-compaction` | 关闭上下文压缩 |
+| `--mock` | 使用离线 Mock 模型 |
 
-最后一步的 `--tools` 最值得跑：它会发一次 `tool_use`，再把 `tool_result` 回传。
-如果端点不接受 `tool_result` 这一轮，**整个外壳一行都用不了** ——
-这比"能不能聊天"重要得多。
+`--approval allow` 不会绕过硬拒绝列表，也不会扩大 Docker 文件工具允许访问的工作区。
 
-交互模式下，`:` 开头的是外壳命令，其它都是给 agent 的请求：
+普通交互模式支持：
 
-```
-:help  :status  :tools  :skills  :todos  :tasks  :team  :mcp  :memory  :notes  :trace  :clear  :quit
-```
-
----
-
-## 5. 每个机制在做什么
-
-### s01 循环 —— `loop.py`
-
-```python
-response = llm.create(system=..., messages=..., tools=...)
-messages.append({"role": "assistant", "content": response.content})
-calls = tool_use_blocks(response.content)
-if not calls: return            # 模型决定停下
-for block in calls: ...         # 执行工具，收集结果
-messages.append({"role": "user", "content": results})
-```
-
-`run_loop` 被**主 agent、每个子 agent、每个队友**共用，区别只在传入的参数。
-循环外还包了三层：上下文压缩 → hooks → 反应式压缩重试。
-
-### s02 工具 —— `tools/`
-
-一个注册表、一张分发表。加能力 = 注册一个 `Tool`，循环不动。
-
-`ToolContext` 是让"一个注册表服务多个调用者"的关键：主 agent、子 agent、三个队友
-共用同一份工具代码，但各自带着不同的工作目录、owner、批准行为。
-
-所有路径都过 `safe_path(ctx, path)` —— 越界在**工具层**被硬拦住，
-不是只靠权限钩子提醒。
-
-### s03 权限 —— `permissions.py`
-
-```
-Gate 1  deny list   硬编码，永不协商，不弹窗
-Gate 2  规则        路径越界 / 破坏性 shell / 未审核的外部工具
-Gate 3  批准        暂停问人；没有人在时按策略 fail closed
+```text
+:help      :status    :tools     :skills    :todos
+:tasks     :team      :mcp       :memory    :notes
+:trace     :clear     :quit
+:goal <验收条件>
+:goal
+:goal clear
 ```
 
-批准过的越界**只对这一次调用有效**：`loop.execute_tool` 每次进入前清空
-`ctx.extra["allow_outside"]`。队友跑在独立线程上，永远不会弹窗（否则会把终端卡死），
-它会改用邮箱去问 lead。
+`:clear` 清空当前对话和目标，不删除任务、记忆或磁盘记录。`:goal <验收条件>` 会启动任务，并在停止阶段通过模型判断目标是否达成，可能产生额外模型调用；它不能代替独立测试。
 
-### s04 钩子 —— `events.py`
+TUI 中 Enter 发送、Ctrl+J 换行、Ctrl+P/N 浏览输入历史、Ctrl+C 请求停止、Ctrl+Q 退出。点击工具卡片可查看参数与输出。向上滚动时暂停自动跟随，回到底部或发送新消息后恢复。模型回答流式显示，Bash 输出仍在命令结束后返回。
 
-hooks 是实例而不是全局变量，所以每个队友、每个子 agent 都能带自己的一套，
-互不串扰。`trigger` 返回**第一个非 None** 的结果 —— 这正是 `PreToolUse`
-能靠返回一个字符串来否决调用的原理。
+## Docker 工具沙箱
 
-### s05 计划 —— `todo.py`
+### 构建与启动
 
-清单是会话状态，不是文件。每次工具返回都重新渲染一遍，所以模型始终看得见
-自己的计划。校验：状态只能三选一、内容非空、最多 20 条、**最多一条 in_progress**。
-模型偶尔会把 list 塞成 JSON 字符串，这里直接解码而不是报错浪费一轮。
-主 agent 和每个线程队友各有一份内存 Todo 清单；队友认领新任务时会清空自己的旧清单。
-跨队友的任务状态、依赖和认领仍由持久化任务板管理，Todo 不承担团队同步。
+先安装并启动 Docker Desktop，使用 Linux 容器模式。在项目根目录构建镜像：
 
-### s06 子 agent —— `subagent.py`
-
-子 agent 是**函数调用**：新上下文、一个答案、然后消失。
-
-它的工具池**故意排除** `task` / `spawn_teammate` / `connect_mcp` —— 递归被结构性
-掐断，不会出现成本爆炸。
-
-### s07 技能 —— `skills.py`
-
-启动只读每个 `SKILL.md` 的 frontmatter，100 个技能只花 100 行目录。
-正文只在模型判断"这个技能适用"时才 `load_skill` 拉进来。
-
-### s08 上下文压缩 —— `context.py`
-
-五级流水线，**便宜的先跑，模型调用永远最后**：
-
-```
-每一轮都跑
-  stage 1  tool_result_budget   超大结果落盘，只留预览
-  stage 2  snip_compact         超过 200 条就把中间归档，保留约 120 条及存档标记
-
-只有 estimate_chars(messages) > 160000 才跑
-  stage 3  micro_compact        已读过的旧结果换成一行指针
-  stage 4  fit_tool_results     还超就把最大的继续瘦身
-  stage 5  compact_history      一次模型调用，总结全部历史
+```powershell
+docker build -t harness-sandbox:dev sandbox
 ```
 
-消息数触发阈值与压缩后的保留量分开，避免每增加一轮工具消息就再次归档；边界上的工具调用和结果会一起保留。字符阈值仍以序列化消息的字符数计算，不等于 token 数。
+镜像包含 Node.js、npm、Python 3、Git、Bash 和 ripgrep。开启沙箱：
 
-阶段 1 的最新工具结果批次预算为 300,000 字符，只对其中超过 50,000 字符的单个结果落盘，保留 6,000 字符预览。阶段 3 保留最近 12 个已消费结果以及未消费结果，仅替换超过 1,000 字符的旧结果，目标为 128,000 字符，已经是指针的内容不重复计数。阶段 4 的预览为 4,000 字符；阶段 5 的摘要输入上限为 160,000 字符，输出预算为 4,000 token。阶段 4、5 都只在前一阶段处理后仍超过 160,000 字符时执行。
-
-外加一条应急路径：请求被供应商以 "prompt too long" 拒了，
-就 `reactive_compact` 后重试**一次**。
-
-模型也可以**主动**要求腾地方：调用 `compact` 工具。它不是立刻执行，而是等到
-**这一批工具全部跑完、结果都追加进去之后**才压缩 —— 否则同一批里的
-`write_file` 还没来得及进历史就被丢掉了。
-
-两条不变量贯穿始终：
-
-* `tool_use` 永远不会丢掉它的 `tool_result`，反之亦然（`snip_compact` 和
-  `reactive_compact` 里各有一处配对修复）
-* 每一步有损操作都**先落盘**，存档路径还要通过"必须位于 tool-results 目录内且文件存在"
-  的信任校验，伪造的指针会被无视
-
-### s09 记忆 —— `memory.py`
-
-三个子系统，三件不同的事：
-
-```
-选择 selection      哪些记录跟**这次请求**有关？    读取 MEMORY.md 目录，每轮都跑
-提取 extraction     这次对话里有什么值得留下？      一轮结束时跑一次
-整合 consolidation  库长大了，合并 / 纠正 / 删过时   只有真的存了东西才触发
+```powershell
+.\.venv\Scripts\python.exe -m agent --tui --sandbox --workdir "D:\btest"
 ```
 
-真正承重的是 `scope` 字段：模型要把候选标成 `persistent` 或 `current_task`，
-**`current_task` 是完全合法的回答，但永远不会落盘**。这一条规矩就是
-"当前先用 8080 端口"没跑进长期记忆的全部原因。
+确保目标工作区存在。当前沙箱绑定 Runtime 的固定工作目录，暂不支持队友切换到不同 worktree；使用沙箱时关闭团队，不与 `--teams` 或启用团队的 `--full` 组合。
 
-另有 19 个"临时话术"标记（`for now` / `本次会话` / `このセッション` …）在入库前被拦下。
+### 执行位置
 
-### s10 任务系统 —— `tasks.py`
-
-一个任务一个 JSON 文件，所以图能扛住崩溃，也能被任何读 JSON 的东西检查：
-
-```
-.agent/tasks/task_a1b2c3d4.json
-{ "id": ..., "subject": ..., "status": "pending", "owner": null,
-  "blockedBy": ["task_e5f6a7b8"] }
+```text
+宿主机 HarnessAgent
+  ├─ Agent Loop、模型 API、权限确认、界面、状态管理
+  └─ Docker 容器
+       ├─ bash / read_file / write_file / edit_file / glob / grep
+       └─ /workspace ← 挂载指定的宿主机工作区
 ```
 
-`blockedBy` 就是全部重点：`claim` 时六道闸门在**同一把锁**里跑完，
-`complete` 会回报"哪些任务刚刚解锁"，所以模型永远知道下一步做什么，
-不需要把整张图记在脑子里。
+例如 `--workdir D:\btest` 对应容器内的 `/workspace`。修改 `/workspace/src/App.vue` 会直接修改 `D:\btest\src\App.vue`，无需复制回来；容器删除后，工作区文件仍然保留。
 
-> 注意：课程 s10 本身**完全没有加锁**。本实现取了 s13 的升级版 ——
-> 可重入锁 + 临时文件 `os.replace` 原子落盘。否则两个队友真的会同时"抢到"同一个任务。
+当前容器配置：
 
-### s13 团队 —— `teams.py` / `team_tools.py`
-
-队友**不是**子 agent。子 agent 是函数调用；队友是**同事**：有名字、有自己的对话、
-有自己的任务占有、还有一个它会持续读的信箱。
-
-```
-Lead agent                          队友 "researcher"
-+--------------------+              +------------------------+
-| task graph         |  spawn       | 自己的 messages[]      |
-| mailbox: lead.jsonl| -----------> | mailbox: researcher... |
-| worktree leases    |              | 自己的工具上下文        |
-|                    | <----------- | 自主认领就绪任务        |
-+--------------------+   信箱        +------------------------+
-```
-
-三个机制撑起协作：
-
-* **信箱** —— 每个 agent 一个 JSONL 文件，发送是追加，接收是"读走即删"。
-  简单到可以用 `type` 命令调试。
-* **原子认领** —— `TaskStore` 在锁里完成状态迁移，所以**有且只有一个**队友能赢，
-  不需要任何协商。
-* **任务绑定 worktree** —— 队友进入它认领任务绑定的 git worktree 里干活，
-  工具 `claim_task` 和自主认领会同步队友状态及目录分配，优先复用任务已有的 worktree。
-  认领后同一批次的后续工具立即使用新目录，系统提示词在每次模型调用前刷新。
-  `complete_task` 成功后释放目录分配，失败时保留；队友退出时归还未完成任务。
-  非 Git 工作区仍使用共享目录；Git worktree 创建或校验失败会返回明确错误并归还新认领任务。
-
-协议消息（计划申请/回复、关闭申请/回复）靠 `request_id` 关联，
-迟到的或伪造的回复会被 `match_response` 拒掉（校验类型 + 发起人 + 是否已解决）。
-
-开启 `require_plan=True` 后，队友先调查代码，再调用 `submit_plan` 自动创建审批请求并发送方案；
-主 agent 收到带 `request_id` 的消息后直接调用 `review_plan`。未批准时，
-`bash`、`write_file`、`edit_file` 仍被计划钩子拦截。等待审批期间再次提交复用未处理请求；
-审批结束后再次提交（例如修改被拒绝的方案）会创建新请求，并重新等待审批。
-`request_plan` 保留为主 agent 主动要求新方案的可选工具，不再是队友首次提交的前提。
-
-### s14 MCP —— `mcp.py`
-
-```
-connect_mcp("docs")  ->  tools/list  ->  mcp__docs__search
-                                          ^^^^^^ 命名空间
-```
-
-两件事让它既安全又无聊：
-
-* **命名空间**：两个服务器都能有 `search`，不会撞车，模型还看得出工具从哪来。
-* **宿主侧授权**：服务器自己描述的 `annotations` 是**不可信输入**。
-  一个工具能不能无人值守地跑，由宿主的 `MCP_HOST_POLICY` 决定，跟服务器说什么无关。
-
-除了课程里的进程内 mock 服务器，这里还实现了一个真的
-`StdioMCPClient`（换行分隔的 JSON-RPC，后台读线程 + 队列，不用 `select`
-所以 Windows 也能跑）。
-
-**关键在时序**：工具池在**每次模型调用前重新读取**，不是开局算一次。
-所以模型在第 N 轮调用 `connect_mcp`，第 N+1 轮就能看到新工具 ——
-同一个回合内，不需要重启。
-
-```
-call 0:  27 tools, mcp=[]                    <- 还没有 docs
-         └─ 模型调用 connect_mcp("docs")
-call 1:  30 tools, mcp=[search, get_version, list_topics]
-```
-
-如果工具池只算一次，模型就**执行不了它没被告知过的工具** —— 而这个问题
-用脚本化的 mock 测试会假通过（脚本强行指定了工具名）。所以测试直接断言
-**发给模型的工具定义本身**发生了变化，而不是断言工具能跑。
-
----
-
-## 6. 工具清单（27 个）
-
-| 分类 | 工具 |
+| 项目 | 设置 |
 |---|---|
-| 文件与执行 | `bash` `read_file` `write_file` `edit_file` `glob` `grep` |
-| 计划 | `todo_write` |
-| 知识 | `load_skill` |
-| 上下文 | `compact` |
-| 任务图 | `create_task` `update_task` `list_tasks` `get_task` `claim_task` `complete_task` |
-| 委派 | `task`（子 agent） |
-| 外部能力 | `connect_mcp` + 运行时的 `mcp__<server>__<tool>` |
-| 团队 | `spawn_teammate` `list_teammates` `send_message` `request_plan` `review_plan` `pending_requests` `request_shutdown` `create_worktree` `remove_worktree` `list_worktrees` |
+| 镜像 | `harness-sandbox:dev` |
+| 工作区 | 指定目录以可写 bind mount 挂载到 `/workspace` |
+| 网络 | `bridge`，允许尝试联网安装依赖 |
+| 用户 | `node` |
+| 资源限制 | 2 GiB 内存、2 CPU、128 PID |
+| 权限收敛 | `--cap-drop ALL`、`no-new-privileges` |
 
-`grep` 最多返回 500 个匹配行；每条内容片段最多 1000 字符，围绕该行首次命中位置显示，并保留文件名和行号。总输出最多 50000 字符，因此长片段可能先达到字符上限。截断时会提示缩小搜索范围；需要完整内容时使用 `read_file`。
+因此 Bash 可以执行 `npm install`、`git clone` 等联网操作，是否成功仍取决于网络、代理和依赖源。容器中的 Python 命令使用 `python3`；安装 Python 依赖时可先创建虚拟环境。
 
-> `grep` 不在课程的工具集里（s02 是 bash/read/write/edit/glob 五个）。
-> 这里加上了，因为一个没有 grep 的编码 agent 是残废的。
->
-> `compact` 只在启用上下文压缩时才注册 —— 没有压缩器时它什么都做不了，
-> 与其给模型一个假工具，不如不给。
+第一次使用基础工具时创建容器，同一个 Runtime 后续通过 `docker exec` 复用它；正常退出时删除容器。重新启动 Runtime 会生成新的容器名称和 ID，但镜像及挂载文件可以相同。异常终止可能留下容器，可在 Docker Desktop 的 **Containers** 页面检查；**Images** 页面显示的是镜像。
 
----
+沙箱会执行工作区内的实际修改，并不回滚文件。MCP 服务、记忆和任务管理等宿主机能力没有因此迁入 Docker；bridge 网络也没有额外的域名白名单。
 
-## 7. 测试
+### 免费验证文件工具
 
-```sh
-python -m unittest discover -s tests
+```powershell
+.\.venv\Scripts\python.exe verify_file_tools_sandbox.py
 ```
 
-**测试全部离线**，不需要 API key、不需要网络。
-`agent/llm.py` 里的 `MockLLM` 支持两种驱动方式：
+脚本在独立的临时工作区中验证写入、读取、精确编辑、嵌套文件搜索、正则搜索、输出上限及越界拦截，最后清理本次工作区和容器。不调用付费模型。
 
-```python
-MockLLM(script=[
-    {"tool": "bash", "input": {"command": "echo hi"}},   # 一次工具调用
-    [ {"tool": "a", ...}, {"tool": "b", ...} ],          # 一轮并行调用
-    "最终答复",                                            # 纯文本 = 停下
-])
+## 运行机制
 
-MockLLM(responder=lambda i, messages, tools: ...)        # 按上下文反应
+### 主循环与工具恢复
+
+```text
+用户请求
+  → 准备上下文、系统提示词和当前工具池
+  → 调用模型
+  → 有工具调用：恢复状态检查与参数校验 → 权限钩子 → 执行 → 回传结果
+  → 无工具调用且回答完整：经过 Stop Hook
+  → 允许结束则返回，否则继续；达到预算或发生错误则停止
 ```
 
-测试覆盖的重点不是"函数返回值对不对"，而是**不变量**：
+主 Agent、一次性子 Agent 和线程队友复用 `run_loop`，分别持有对应的对话和执行上下文。
 
-* 越界路径即使绕开钩子也写不出去；批准不会泄漏到下一次调用
-* 一个 `tool_use` 永远不会丢掉它的 `tool_result`
-* 四个线程同时抢一个任务，只有一个人赢
-* 伪造的存档指针、伪造的协议回复、`current_task` 记忆全部被拒
-* 队友的工具池里没有 `task`，子 agent 的工具池里没有 `task`
-* 工作区不是 git 仓库时，worktree 请求给出可读的错误而不是崩溃
+工具恢复区分两种路径：
 
-任务级耗时评测可运行 `python -m evals.team_speed --provider mock` 先检查流程，
-再运行 `python -m evals.team_speed --provider deepseek --repeats 3` 做真实对照。
-它会分别记录单 Agent 与团队模式从开始到独立验收通过的耗时、模型调用量和失败状态；
-设计与局限见 [evals/README.md](evals/README.md)。真实运行会消耗 API 额度。
-验证反馈对照可运行 `python -m evals.verification_feedback --provider mock`，
-再用 `--provider deepseek` 比较笼统失败提示与具体失败用例对修复成功率的影响。
+- **程序重试**：工具必须同时满足只读、允许安全重试、错误属于暂时性故障等条件，首次执行后最多自动重试两次，每次重新检查权限。
+- **模型修正**：参数错误、未知工具、目标不存在或替换前提不满足时，将结构化错误回传模型。相同调用者、工作目录、工具和目标，首次失败后最多提供两次修正机会；成功会清除该计数。
 
----
+写入或编辑结果未知时，不自动重复修改。恢复器要求先完整读取目标文件、确认实际状态，再允许后续写入。读取被截断或只读取部分行，不能解除该状态。
 
-## 8. 已知边界
+模型返回空内容、只有思考内容或被截断的正文时，最多进行两次不完整响应恢复。若工具调用响应以 `max_tokens` 截断，该批调用会被丢弃，避免执行不完整参数。循环正常结束也不等于代码已经正确，仍需测试验收。
 
-诚实清单 —— 这些是设计取舍，不是疏漏：
+### 基础工具
 
-* **信箱没有跨进程锁。** 读走即删，进程内加锁。两个**进程**共享同一个工作区
-  会丢消息。当前设计（线程队友）下这是够的。
-* **任务是进程内加锁 + 原子写。** 跨进程安全还需要文件锁，而 `fcntl`
-  是 POSIX-only，所以这里没做。
-* **队友的工具池是固定子集**，不跟随主 agent 动态变化（MCP 工具不会自动下发给队友）。
-* **`StdioMCPClient` 没有在受限沙箱里实测过**（沙箱禁止管道通信）；
-  进程内 MCP 服务器是主路径，也是被测试覆盖的那条。
-* **`--provider mock` 不是模型。** 它只会照本宣科，用来验证外壳，
-  不会给你任何智能。
-* **压缩阈值按字符数算，不按 token。** 课程如此，所以它可能估错 ——
-  这正是 `reactive_compact` 存在的理由。
-* **记忆的去重是"归一化后完全相等"，不是语义相似。** 换个说法讲同一件事，
-  两条都会被存下来。整合（consolidation）是用来收拾这个的。
+| 工具 | 行为与主要限制 |
+|---|---|
+| `bash` | 执行命令，默认超时 120 秒；返回退出状态和 stdout/stderr |
+| `read_file` | 按行读取，支持 `offset`、`limit`；正文最多 50,000 字符 |
+| `write_file` | 创建或覆盖文件，按需创建父目录 |
+| `edit_file` | 精确文本替换；默认要求唯一匹配，`replace_all=true` 才允许多处替换 |
+| `glob` | 按通配符查找路径，最多返回 200 个匹配 |
+| `grep` | Python 正则搜索，返回路径、行号及命中片段 |
 
----
+`grep` 最多返回 500 个匹配行，每行片段最多 1,000 字符，总输出最多 50,000 字符；跳过超过 2,000,000 字节的文件及识别出的二进制内容。长行预览围绕首次命中位置生成，截断时提示缩小范围。
 
-## 9. 许可
+未开启 Docker 时使用宿主机工具实现；开启后六个基础工具都走容器分支，容器执行失败不会回退到宿主机执行。
 
-MIT。
+### 五层上下文压缩
+
+压缩器在模型调用前准备上下文，先执行本地处理，仍超限时才调用模型摘要。
+
+| 阶段 | 默认触发条件 | 处理方式 |
+|---|---|---|
+| 1. 工具结果预算 | 最新一批结果超过 300,000 字符 | 将其中超过 50,000 字符的大结果落盘，保留 6,000 字符预览 |
+| 2. 中段归档 | 对话超过 200 条消息 | 归档中间历史，保留约 120 条及归档标记，边界按工具配对调整 |
+| 3. 旧结果替换 | 消息序列化后超过 160,000 字符 | 将较大的已消费旧结果替换为文件指针，保留最近 12 个已消费结果和未消费结果 |
+| 4. 工具结果瘦身 | 阶段 3 后仍超过 160,000 字符 | 进一步处理较大结果，使用 4,000 字符预览 |
+| 5. 模型摘要 | 阶段 4 后仍超过 160,000 字符 | 调用模型生成摘要；摘要输入上限 160,000 字符，输出预算 4,000 token |
+
+阶段 3、4 的目标消息规模为 128,000 字符。模型还可调用 `compact` 主动请求压缩，在当前批工具结果追加完成后执行；供应商拒绝超长上下文时，也有应急压缩后的有限重试。
+
+**触发阈值使用字符数或消息数，不是 token 数。** 实际模型用量由供应商返回的 usage 记录。历史归档先落盘，再以指针或摘要替换上下文；这不保证模型一定能找回所有信息，也不保证每次任务都会触发全部五层压缩。
+
+### Skills、记忆与协作
+
+Skills 从工作区的 `skills/` 或 `AGENT_SKILL_DIRS` 指定目录发现，启动只读取技能元数据，由 `load_skill` 按需加载正文。
+
+长期记忆通过选择、提取和整合管理记录；提取阶段区分 `persistent` 与 `current_task`，后者不作为长期记忆入库。开启记忆会增加相应模型调用。
+
+一次性子 Agent 使用独立对话完成委派，工具池排除 `task`、`spawn_teammate`、`connect_mcp`，防止继续递归委派。线程队友则保留自己的状态和信箱，可认领共享任务，按计划门规则申请审核，并在任务绑定的 Git worktree 中工作。worktree 需要目标项目本身是 Git 仓库，成果通过 Git 流程合并，不会自动合并到主工作目录。
+
+团队任务认领使用进程内锁；任务文件原子写入。当前没有多进程共享同一状态目录所需的完整协调保障。
+
+## 配置、状态与诊断
+
+主要配置项：
+
+| 配置 | 默认值或用途 |
+|---|---|
+| `AGENT_WORKDIR` | 当前目录，可被 `--workdir` 覆盖 |
+| `AGENT_STATE_DIR` | `<workdir>/.agent` |
+| `AGENT_SKILL_DIRS` | 默认 `<workdir>/skills`；Windows 多目录以分号分隔 |
+| `AGENT_MAX_TOKENS` | 单次模型调用输出预算，默认 8,000 |
+| `AGENT_MAX_TURNS` | 单次主循环轮数上限，默认 150 |
+| `AGENT_SUBAGENT_MAX_TURNS` | 子 Agent 轮数上限，默认 150 |
+| `AGENT_APPROVAL` | 默认 `ask`，可设 `allow` 或 `deny` |
+| `GOAL_EVALUATOR_MODEL_ID` | 可选的目标评估模型，默认使用当前模型 |
+| `AGENT_GOAL_BLOCK_CAP` | 每次请求的目标自动续轮上限，默认 8 |
+
+轮数限制与单次输出预算不等于整个任务的精确 token 或费用上限。摘要、记忆、目标评估和队友也可能产生模型调用。
+
+默认状态目录：
+
+```text
+<workdir>/.agent/
+├─ tasks/          共享任务文件
+├─ mailbox/        团队消息
+├─ worktrees/      任务工作树
+├─ memory/         长期记忆
+├─ transcripts/    压缩前的历史归档
+├─ tool-results/   落盘的工具结果
+└─ runs/<运行编号>/
+   ├─ events.jsonl
+   └─ summary.json
+```
+
+`:trace` 查看调用分类、工具统计、停止原因和日志路径。runs 记录调用元数据、参数指纹及供应商用量，不保存参数正文、工具结果正文、回答正文或模型思考。历史归档和工具结果文件属于另一类数据，可能包含完整内容；`--verbose` 的终端输出也可能包含参数与结果片段。
+
+供应商 token 字段缺失时保留未知状态，不用字符数冒充 token。缓存读写 token 单独记录，不跨供应商假定相同计费语义。
+
+## 测试与评测
+
+### 离线测试
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+单独验证新增 Docker 文件工具逻辑，无需启动 Docker：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_sandbox_file_tools.py -v
+```
+
+真实容器验证使用前面的 `verify_file_tools_sandbox.py`，需要 Docker 和本地镜像，但不需要模型密钥。
+
+### 上下文召回与 token 对照
+
+固定的 50 个合成场景分为信息事实、任务约束、版本修订、相似干扰和长文本摘要五类，每类 10 个。每例对照 `full` 与 `compact`，检查六项已知信息和一项正确拒答。
+
+```powershell
+# 只查看运行计划，不调用模型
+.\.venv\Scripts\python.exe -m evals.recall50 --provider mock --plan
+
+# 免费检查小批量评测流程
+.\.venv\Scripts\python.exe -m evals.recall50 --provider mock --limit 5
+```
+
+真实评测会产生 API 费用。需要时可先跑一例：
+
+```powershell
+.\.venv\Scripts\python.exe -m evals.recall50 --provider deepseek --model deepseek-v4-flash --ids facts-start-high
+```
+
+去掉 `--ids` 可运行全部 50 个场景；默认双组、一次重复，共 100 次 Agent 运行，每次可能包含多个模型调用。评测脚本默认最多 40 轮，与普通 CLI 的 150 轮默认值分开配置，可用 `--max-turns` 调整。
+
+结果保存到 `.scratch/evals/recall50-*/`，包括 `report.md`、`summary.json` 和逐次运行记录。主要检查：
+
+- 已知信息逐项召回率，以及独立的正确拒答检查。
+- Agent 是否正常结束、最终 JSON 是否有效、最终交付正确项数及整例通过率。
+- 供应商实际返回的输入、输出和缓存 token，以及成对用量变化。
+- 是否触发压缩、工具调用量、模型调用量、耗时和失败原因。
+
+Mock 的满分只能说明预设流程通过，不能代表真实召回能力。检查压缩效果前，应确认压缩实际触发，并将额外摘要调用计入用量。历史评测报告对应各自的代码、配置和样本，不代表当前版本效果。
+
+其他评测包括上下文压缩任务对照、单 Agent 与团队耗时对照、验证反馈对照。用法和指标定义见 [评测说明](evals/README.md) 与 [50 组召回评测说明](docs/50组上下文召回评测使用说明.md)。
+
+## 项目结构与阅读顺序
+
+```text
+agent/
+├─ cli.py / tui.py          命令行与终端界面
+├─ runtime.py              组装服务、状态、工具和钩子
+├─ loop.py                 Agent 主循环与工具执行入口
+├─ llm.py                  供应商客户端、流式返回、usage、Mock
+├─ permissions.py          应用层权限决策
+├─ sandbox.py              Docker 容器与工具调用
+├─ sandbox_file_tools.py   容器内编辑及搜索脚本
+├─ context.py              五层上下文压缩
+├─ skills.py / memory.py   技能加载与长期记忆
+├─ subagent.py             一次性委派
+├─ tasks.py / teams.py     任务图与线程队友
+├─ team_tools.py           团队工具与 worktree 接线
+├─ mcp.py                  外部工具接入
+├─ diagnostics.py          运行元数据与统计
+└─ tools/
+   ├─ registry.py          工具定义、校验与分发
+   ├─ result.py            结构化结果
+   ├─ recovery.py          重试、修正预算与未知状态
+   └─ basic.py             六个基础工具入口
+sandbox/Dockerfile         工具容器镜像
+skills/                    技能文件
+tests/                     离线测试
+evals/                     任务级对照评测
+docs/                      实现讲解与评测说明
+```
+
+建议从 [Agent Loop 执行流程总结](docs/AgentLoop-执行流程总结.md) 开始，再阅读：
+
+- [工具错误恢复说明](docs/工具错误恢复说明.md)
+- [命令执行与失败诊断](docs/命令执行与失败诊断.md)
+- [终端界面与流式输出](docs/终端界面与流式输出.md)
+- [运行轮次诊断](docs/运行轮次诊断.md)
+- [Runtime 项目概念总结](docs/Runtime-项目概念总结.md)
+
+## 许可
+
+[MIT](LICENSE)。

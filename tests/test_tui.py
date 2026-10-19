@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from textual.containers import VerticalScroll
+
 from common import HarnessCase
 from agent.permissions import Rule
 from agent.tui import ApprovalScreen, HarnessApp, MessagePane, Prompt
@@ -38,6 +40,47 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
             await pilot.press("ctrl+n")
             self.assertEqual(prompt.text, "")
 
+    async def test_sending_from_history_scrolls_to_latest_response(self):
+        runtime = self.make_runtime(script=["最新回答\n\n" * 40], teams_enabled=False)
+        app = HarnessApp(runtime)
+        async with app.run_test(size=(100, 30)) as pilot:
+            chat = app.query_one("#chat", VerticalScroll)
+            await app.add_message("历史", "过去的内容\n\n" * 40)
+            await self.until(pilot, lambda: chat.max_scroll_y > 0 and chat.is_vertical_scroll_end)
+            chat.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            self.assertFalse(chat.is_vertical_scroll_end)
+            app.query_one(Prompt).load_text("继续任务")
+            await pilot.press("enter")
+            await self.until(pilot, lambda: len(runtime.llm.calls) == 1 and not app.busy)
+            await self.until(pilot, lambda: chat.is_vertical_scroll_end)
+            self.assertEqual(app.model_panes[next(iter(app.model_panes))].text, "最新回答\n\n" * 40)
+
+    async def test_stream_follows_layout_growth_but_preserves_manual_scroll(self):
+        runtime = self.make_runtime(teams_enabled=False)
+        app = HarnessApp(runtime)
+        async with app.run_test(size=(100, 30)) as pilot:
+            chat = app.query_one("#chat", VerticalScroll)
+            chunk = "这是一段正在生成的回答。\n\n" * 30
+            app.receive_event(UIEvent("text_delta", "lead", "scroll-test", chunk))
+            await self.until(pilot, lambda: chat.max_scroll_y > 0 and chat.is_vertical_scroll_end)
+            height = chat.max_scroll_y
+            app.receive_event(UIEvent("text_delta", "lead", "scroll-test", chunk))
+            await self.until(pilot, lambda: chat.max_scroll_y > height and chat.is_vertical_scroll_end)
+            chat.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            height, position = chat.max_scroll_y, chat.scroll_y
+            app.receive_event(UIEvent("text_delta", "lead", "scroll-test", chunk))
+            await self.until(pilot, lambda: chat.max_scroll_y > height)
+            self.assertEqual(chat.scroll_y, position)
+            self.assertFalse(chat.is_vertical_scroll_end)
+            # Returning to the bottom enables follow again.
+            chat.scroll_end(animate=False)
+            await self.until(pilot, lambda: chat.is_vertical_scroll_end)
+            height = chat.max_scroll_y
+            app.receive_event(UIEvent("text_delta", "lead", "scroll-test", chunk))
+            await self.until(pilot, lambda: chat.max_scroll_y > height and chat.is_vertical_scroll_end)
+
     async def test_tool_card_can_expand_and_owner_streams_stay_separate(self):
         self.write("file.txt", "local output")
         runtime = self.make_runtime(script=[{"tool": "read_file", "input": {"path": "file.txt"}}, "done"], teams_enabled=False)
@@ -46,6 +89,10 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
             await self.until(pilot, lambda: not app.busy and len(app.tools) == 1)
             card, body, _ = next(iter(app.tools.values()))
             self.assertTrue(card.collapsed)
+            # Model completion is reported before Markdown's deferred layout.
+            # Wait for a stable, visible click target after following to bottom.
+            card.scroll_visible(animate=False)
+            await pilot.pause()
             await pilot.click(card, offset=(3, 0))
             self.assertFalse(card.collapsed)
             app.receive_event(UIEvent("text_delta", "worker", "worker-id", "队友内容"))

@@ -59,7 +59,7 @@ from .todo import TodoList, register_todo_tools
 from .tools.basic import register_basic_tools, shell_hint
 from .tools.registry import ToolContext, ToolRegistry
 from .ui_events import UIEvent
-
+from .sandbox import DockerSandbox
 MASKED_TOOL_OUTPUT_WARN = 100_000
 
 
@@ -92,6 +92,7 @@ class Runtime:
         goal_evaluator: GoalEvaluator | None = None,
         diagnostics_enabled: bool = True,
         on_ui_event: Callable[[UIEvent], None] | None = None,
+        sandbox_enabled: bool=False
     ):
         self.settings = settings
         self.llm = llm
@@ -102,7 +103,8 @@ class Runtime:
         self.cancel_event = None
         self.stats = RuntimeStats()
         self.notes: list[str] = []
-
+        self.sandbox_enabled=sandbox_enabled
+        self.sandbox: DockerSandbox | None=None
         settings.ensure_dirs()
         self.diagnostics = (RunTrace(settings.state_dir / "runs", provider=settings.provider,
                                      model=settings.model) if diagnostics_enabled else None)
@@ -110,7 +112,7 @@ class Runtime:
         # -- the tool pool --------------------------------------------------
         # 工具注册
         self.tools = ToolRegistry()
-        register_basic_tools(self.tools)
+        register_basic_tools(self.tools,sandbox_enabled=self.sandbox_enabled)
         register_todo_tools(self.tools)
         register_skill_tools(self.tools)
         register_task_tools(self.tools)
@@ -225,7 +227,8 @@ class Runtime:
         script: list[Any] | None = None,
         responder: Callable[[int, list[dict], list[dict]], Any] | None = None,
         env_file: str | Path | None = None,
-        **overrides: Any,
+        sandbox_enabled: bool = False,
+        **overrides: Any
     ) -> "Runtime":
         """Build a runtime from the environment, or from explicit overrides.
 
@@ -241,7 +244,7 @@ class Runtime:
         # `script` and settings overrides are not Runtime concerns.
         for key in ("provider", "model", "base_url", "api_key", "workdir", "state_dir", "skill_dirs", "goal_evaluator_model", "goal_block_cap"):
             overrides.pop(key, None)
-        return cls(settings, llm, approval=approval, **overrides)
+        return cls(settings, llm, approval=approval, **overrides,sandbox_enabled=sandbox_enabled)
 
     # ------------------------------------------------------------------
     # Hooks
@@ -378,7 +381,8 @@ class Runtime:
         prompt = build_system_prompt(
             workdir=self.settings.workdir,
             tool_names=self.tools.names(),
-            shell=shell_hint(),
+            shell="/bin/bash in Docker" if self.sandbox_enabled else shell_hint(),
+            sandbox_enabled=self.sandbox_enabled,
             skill_catalog=self.skills.catalog(),
             memory_sections=memory_sections,
             mcp_servers=self.mcp.names(),
@@ -694,13 +698,34 @@ class Runtime:
         if self.teams is not None:
             lines.append(f"team:       {len(self.teams.teammates)} teammate(s)")
         return "\n".join(lines)
-
+#----------------------------------------------------------------------
+# sandbox
+#----------------------------------------------------------------------
+    def get_sandbox(self,workdir: Path)->DockerSandbox:
+        """获取当前工作区的沙箱，第一次使用时创建"""
+        if not self.sandbox_enabled:
+            raise RuntimeError("当前没有开启沙箱")
+        # 第一版只支持Runtime的固定工作区
+        # 队友切换到其他worktree时，需要单独分配容器
+        if Path(workdir).resolve()!=self.settings.workdir.resolve():
+            raise ValueError("当前沙箱尚不支持切换工作目录")
+        if self.sandbox is None:
+            sandbox=DockerSandbox(str(workdir))
+            sandbox.start()
+            self.sandbox=sandbox
+        return self.sandbox
     def close(self) -> None:
-        if self.teams is not None:
-            self.teams.stop_all()
-        self.mcp.close_all()
-        if self.diagnostics:
-            self.diagnostics.flush()
+        try:
+            if self.teams is not None:
+                self.teams.stop_all()
+            self.mcp.close_all()
+        finally:
+            try:
+                if self.sandbox is not None:
+                    self.sandbox.close()
+            finally:
+                if self.diagnostics:
+                    self.diagnostics.flush()
 
     def __enter__(self) -> "Runtime":
         return self
