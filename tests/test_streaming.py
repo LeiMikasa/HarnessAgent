@@ -58,6 +58,21 @@ class StreamingTests(HarnessCase):
                           system="sys", ctx=ctx, max_turns=6)
         return result, messages, events
 
+    def test_context_usage_event_works_without_diagnostics(self):
+        from agent.token_budget import estimate_request_tokens
+
+        result, _, events = self.drive(MockLLM(script=["done"]))
+        self.assertTrue(result.ok)
+        usage = next(event for event in events if event.kind == "context_usage")
+        self.assertEqual(usage.data["estimated_input_tokens"], estimate_request_tokens(
+            "sys", [{"role": "user", "content": "go"}], []
+        ))
+        self.assertIsNone(usage.data["input_token_limit"])
+        self.assertEqual(sum(usage.data["estimated_input_token_breakdown"].values()),
+                         usage.data["estimated_input_tokens"])
+        self.assertEqual(usage.data["estimated_input_token_breakdown"]["tool_results"], 0)
+        self.assertLess(events.index(usage), next(i for i, event in enumerate(events) if event.kind == "model_start"))
+
     def test_text_stream_excludes_thinking_and_partial_tool_json_and_keeps_usage(self):
         tool = {"type": "tool_use", "id": "t", "name": "write_file", "input": {"path": "x", "content": "y"}}
         stream = StreamFixture([

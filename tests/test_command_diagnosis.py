@@ -8,6 +8,8 @@ import os
 import shlex
 import subprocess
 import sys
+import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -48,6 +50,23 @@ class ShellOutputTests(HarnessCase):
         script = self.write("success.py", "print('检查通过')\n")
         result = run_bash({"command": python_command(script)}, self.ctx)
         self.assertEqual(result, "检查通过")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows console regression")
+    def test_shell_command_does_not_enable_echo_in_the_tui_console(self):
+        # The probe gets a separate hidden console; never alter the test runner's
+        # or the user's input mode. It calls the real run_bash implementation.
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+        probe = Path(__file__).with_name("windows_console_probe.py")
+        completed = subprocess.run([sys.executable, str(probe), str(self.tmp)],
+                                   creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=startup,
+                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", "replace"))
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["output"], "ready")
+        self.assertEqual(result["before"], 0x0200)
+        self.assertEqual(result["after"], result["before"], "cmd re-enabled console echo/line input")
 
     def test_large_stdout_cannot_hide_stderr_and_overall_error_is_bounded(self):
         completed = subprocess.CompletedProcess("x", 2, stdout=b"x" * 100_000,

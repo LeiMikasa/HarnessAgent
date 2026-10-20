@@ -6,6 +6,7 @@ import os
 from pathlib import PurePosixPath
 from .tools.result import ToolResult,tool_error
 from textwrap import dedent
+from .shell import noninteractive_process_options
 
 class DockerSandbox:
     def __init__(self,workspace:str):
@@ -25,6 +26,7 @@ class DockerSandbox:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            **noninteractive_process_options(input_provided=input_text is not None),
         )
     def start(self):
         """启动一个后台容器"""

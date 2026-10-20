@@ -8,7 +8,7 @@ cheapest first, and the model call itself is always last:
       stage 1  tool_result_budget   persist large results from an oversized batch
       stage 2  snip_compact         once >200 messages, retain about 120
 
-    only when estimate_chars(messages) > 160000
+    only when estimated request input > 200000 tokens (including 20% margin)
       stage 3  micro_compact        replace old *consumed* results with a pointer
       stage 4  fit_tool_results     shrink whatever is still biggest
       stage 5  compact_history      one model call: summarize everything
@@ -25,9 +25,9 @@ Two invariants hold throughout:
     `reactive_compact`)
   * every lossy step writes an archive to disk first, so nothing is truly lost
 
-Units: whole-history limits use characters of
-`json.dumps(messages, default=str, ensure_ascii=False)`. Tool-output limits use
-text characters, snipping uses message counts, and summary output uses tokens.
+Units: input budgets use offline token estimates, including system and tool
+definitions. Preview lengths remain characters; snipping uses message counts.
+Summary output uses provider tokens. Estimates never replace actual API usage.
 """
 
 from __future__ import annotations
@@ -39,22 +39,28 @@ from pathlib import Path
 from typing import Any
 
 from .llm import LLMClient, extract_text
+from .token_budget import ESTIMATOR_ID, estimate_request_tokens, estimate_text_tokens, estimate_tokens
 
 # Messages that are newer than the model's last assistant turn have not been
 # read yet; compacting them would throw away information the model needs.
 
 
+class ContextBudgetError(ValueError):
+    """Fixed request overhead cannot be reduced by compacting messages."""
+
+
 class ContextCompactor:
     """The five-stage pipeline plus its disk-backed safety net."""
 
-    # Whole-conversation character limit before the expensive stages engage.
-    CONTEXT_CHAR_LIMIT = 160_000 # 超过这个字符数才启动阶段3-5
+    # Input policy budget, NOT a claim about a provider's context window.
+    # Conservative starting policy for long-context coding; estimates are weighted.
+    CONTEXT_TOKEN_LIMIT = 200_000
     # Stage 1: budget for the newest batch of tool results.
-    TOOL_RESULT_BATCH_CHAR_LIMIT = 300_000 # 最新一批工具结果的总预算
+    TOOL_RESULT_BATCH_TOKEN_LIMIT = 150_000
     # A result must be at least this big before persisting it is worthwhile.
-    LARGE_RESULT_CHAR_LIMIT = 50_000 # 单个结果超过这个大小才值得持久化
+    LARGE_RESULT_TOKEN_LIMIT = 25_000
     # Cap on what is fed to the summarizer.
-    SUMMARY_INPUT_CHAR_LIMIT = 160_000 # 喂给总结器的输入上限
+    SUMMARY_INPUT_TOKEN_LIMIT = 80_000
     # How many already-read results stay intact in stage 3.
     KEEP_RECENT_RESULTS = 12  #阶段3保留最近几个已消费结果不动
     # How many messages survive a reactive compaction.
@@ -66,10 +72,11 @@ class ContextCompactor:
     SNIP_HEAD = 3
 
     # Results shorter than this are not worth replacing with a pointer.
-    MICRO_COMPACT_MIN_CHARS = 1_000
+    MICRO_COMPACT_MIN_TOKENS = 500
     PERSIST_PREVIEW_CHARS = 6_000
     FIT_PREVIEW_CHARS = 4_000
     SUMMARY_MAX_TOKENS = 4_000
+    TOKEN_ESTIMATOR = ESTIMATOR_ID
 
     def __init__(
         self,
@@ -92,10 +99,13 @@ class ContextCompactor:
     # ------------------------------------------------------------------
     # Measurement and block predicates
     # ------------------------------------------------------------------
-    # 把整个消息列表序列化成JSON，取长度
+    # Retained for historical diagnostics/evaluation, not compaction decisions.
     @staticmethod
     def estimate_chars(messages: list) -> int:
         return len(json.dumps(messages, default=str, ensure_ascii=False))
+
+    estimate_tokens = staticmethod(estimate_tokens)
+    estimate_request_tokens = staticmethod(estimate_request_tokens)
 
     @staticmethod
     def block_type(block) -> str | None:
@@ -220,7 +230,7 @@ class ContextCompactor:
         )
     # 不超过单结果阈值的内容原样返回，超过才持久化。
     def persist_large_output(self, tool_use_id: str, output: str) -> str:
-        if len(output) <= self.LARGE_RESULT_CHAR_LIMIT:
+        if estimate_text_tokens(output) <= self.LARGE_RESULT_TOKEN_LIMIT:
             return output
         return self.persisted_preview(tool_use_id, output)
     # 判断一条消息是不是有效的归档标记，并且路径指向 transcript_dir 内部且文件存在。同样有安全检查。
@@ -244,7 +254,7 @@ class ContextCompactor:
     # Stage 1 -- per-round tool result budget
     # ------------------------------------------------------------------
 
-    def tool_result_budget(self, messages: list, max_chars: int | None = None) -> list:
+    def tool_result_budget(self, messages: list, max_tokens: int | None = None) -> list:
         """Persist the biggest results in the newest batch when it is oversized.
 
         Runs every round.  Only the trailing user message is inspected, and
@@ -260,19 +270,19 @@ class ContextCompactor:
             block for block in content
             if isinstance(block, dict) and block.get("type") == "tool_result"
         ]
-        limit = max_chars or self.TOOL_RESULT_BATCH_CHAR_LIMIT
-        total = sum(len(str(block.get("content", ""))) for block in blocks)
+        limit = self.TOOL_RESULT_BATCH_TOKEN_LIMIT if max_tokens is None else max_tokens
+        total = sum(estimate_text_tokens(str(block.get("content", ""))) for block in blocks)
 
-        for block in sorted(blocks, key=lambda item: len(str(item.get("content", ""))), reverse=True):
+        for block in sorted(blocks, key=lambda item: estimate_text_tokens(str(item.get("content", ""))), reverse=True):
             if total <= limit:
                 break
             output = str(block.get("content", ""))
-            if len(output) <= self.LARGE_RESULT_CHAR_LIMIT:
+            if estimate_text_tokens(output) <= self.LARGE_RESULT_TOKEN_LIMIT:
                 continue
             block["content"] = self.persist_large_output(
                 block.get("tool_use_id", "unknown"), output
             )
-            total = sum(len(str(item.get("content", ""))) for item in blocks)
+            total = sum(estimate_text_tokens(str(item.get("content", ""))) for item in blocks)
         return messages
 
     # ------------------------------------------------------------------
@@ -328,7 +338,8 @@ class ContextCompactor:
     # Stage 3 -- micro compaction
     # ------------------------------------------------------------------
     # 把已经被模型读过的旧工具结果替换成一行指针。
-    def micro_compact(self, messages: list, target_chars: int | None = None) -> list:
+    def micro_compact(self, messages: list, target_tokens: int | None = None,
+                      *, system: str = "", tools: list | None = None) -> list:
         """Replace already-read results with a one-line pointer.
 
         The newest `KEEP_RECENT_RESULTS` consumed results stay intact, and
@@ -346,10 +357,10 @@ class ContextCompactor:
 
         replaced = 0
         for _, _, block in consumed[: -self.KEEP_RECENT_RESULTS]:
-            if target_chars is not None and self.estimate_chars(messages) <= target_chars:
+            if target_tokens is not None and self.estimate_request_tokens(system, messages, tools) <= target_tokens:
                 break
             content = str(block.get("content", ""))
-            if len(content) <= self.MICRO_COMPACT_MIN_CHARS:
+            if estimate_text_tokens(content) <= self.MICRO_COMPACT_MIN_TOKENS:
                 continue
             saved_path = self.persisted_output_path(content)
             if not saved_path:
@@ -369,7 +380,8 @@ class ContextCompactor:
     # Stage 4 -- fit the biggest remaining results
     # ------------------------------------------------------------------
 
-    def fit_tool_results(self, messages: list, target_chars: int) -> list:
+    def fit_tool_results(self, messages: list, target_tokens: int,
+                         *, system: str = "", tools: list | None = None) -> list:
         """Shrink the largest results until the conversation fits.
 
         Unlike stage 3 this deliberately touches unseen results: a single huge
@@ -382,14 +394,14 @@ class ContextCompactor:
             for block in message["content"]
             if isinstance(block, dict) and block.get("type") == "tool_result"
         ]
-        for block in sorted(results, key=lambda item: len(str(item.get("content", ""))), reverse=True):
-            if self.estimate_chars(messages) <= target_chars:
+        for block in sorted(results, key=lambda item: estimate_text_tokens(str(item.get("content", ""))), reverse=True):
+            if self.estimate_request_tokens(system, messages, tools) <= target_tokens:
                 break
             output = str(block.get("content", ""))
             replacement = self.persisted_preview(
                 block.get("tool_use_id", "unknown"), output, preview_chars=self.FIT_PREVIEW_CHARS
             )
-            if len(replacement) < len(output):
+            if estimate_text_tokens(replacement) < estimate_text_tokens(output):
                 block["content"] = replacement
         return messages
 
@@ -404,15 +416,33 @@ class ContextCompactor:
         trimmed head-and-tail with the middle elided.
         """
         conversation = json.dumps(messages, default=str, ensure_ascii=False)
-        if len(conversation) <= self.SUMMARY_INPUT_CHAR_LIMIT:
+
+        def fits(text: str) -> bool:
+            return self.estimate_request_tokens(
+                self.SUMMARIZER_SYSTEM, [{"role": "user", "content": text}], []
+            ) <= self.SUMMARY_INPUT_TOKEN_LIMIT
+
+        if fits(conversation):
             return conversation
-        head = self.SUMMARY_INPUT_CHAR_LIMIT // 4
-        tail = self.SUMMARY_INPUT_CHAR_LIMIT - head
-        return (
-            conversation[:head]
-            + "\n...[middle omitted; full transcript is on disk]...\n"
-            + conversation[-tail:]
-        )
+        marker = "\n...[middle omitted; full transcript is on disk]...\n"
+        if not fits(marker):
+            raise ContextBudgetError("Summary input budget is too small for its system prompt and archive marker.")
+
+        # Keep one quarter from the head and three quarters from the tail.
+        # Search by characters, but accept only a complete request within budget.
+        def clipped(size: int) -> str:
+            head = size // 4
+            tail = size - head
+            return conversation[:head] + marker + (conversation[-tail:] if tail else "")
+
+        low, high = 0, len(conversation)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if fits(clipped(middle)):
+                low = middle
+            else:
+                high = middle - 1
+        return clipped(low)
 
     SUMMARIZER_SYSTEM = (
         "Summarize the supplied coding-agent conversation as factual state. "
@@ -478,21 +508,27 @@ class ContextCompactor:
     # Orchestration
     # ------------------------------------------------------------------
 
-    def prepare(self, messages: list, active_request: str) -> list:
+    def prepare(self, messages: list, active_request: str, *,
+                system: str = "", tools: list | None = None) -> list:
         """Run the pipeline.  Called before every model request."""
         if not self.enabled:
             return messages
+        if self.estimate_request_tokens(system, [], tools) >= self.CONTEXT_TOKEN_LIMIT:
+            raise ContextBudgetError(
+                "System prompt and tool definitions exhaust the estimated input-token budget. "
+                "Reduce fixed context or increase CONTEXT_TOKEN_LIMIT; summarizing history cannot fix this."
+            )
         # 大工具结果归档
         messages = self.tool_result_budget(messages)
         # 中间结果归档
         messages = self.snip_compact(messages)
         #
-        if self.estimate_chars(messages) > self.CONTEXT_CHAR_LIMIT:
-            target = int(self.CONTEXT_CHAR_LIMIT * 0.8)
-            messages = self.micro_compact(messages, target)
-            if self.estimate_chars(messages) > self.CONTEXT_CHAR_LIMIT:
-                messages = self.fit_tool_results(messages, target)
-            if self.estimate_chars(messages) > self.CONTEXT_CHAR_LIMIT:
+        if self.estimate_request_tokens(system, messages, tools) > self.CONTEXT_TOKEN_LIMIT:
+            target = int(self.CONTEXT_TOKEN_LIMIT * 0.8)
+            messages = self.micro_compact(messages, target, system=system, tools=tools)
+            if self.estimate_request_tokens(system, messages, tools) > self.CONTEXT_TOKEN_LIMIT:
+                messages = self.fit_tool_results(messages, target, system=system, tools=tools)
+            if self.estimate_request_tokens(system, messages, tools) > self.CONTEXT_TOKEN_LIMIT:
                 messages = self.compact_history(messages, active_request)
         return messages
 

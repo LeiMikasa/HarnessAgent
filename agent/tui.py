@@ -171,6 +171,8 @@ class HarnessApp(App[int]):
         self.last_final = ""
         self.worker: threading.Thread | None = None
         self.started_at: float | None = None
+        # Snapshot of the last prepared lead request, not cumulative API usage.
+        self.context_usage: dict | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("窗口过小\n请调整到至少 60 列 × 18 行\nCtrl+Q 退出", id="minimum-size", markup=False)
@@ -181,18 +183,22 @@ class HarnessApp(App[int]):
                 yield Static("● 就绪", id="activity", markup=False)
             yield Static(Text("工作区  " + plain(self.runtime.settings.workdir), no_wrap=True, overflow="ellipsis"), id="workspace")
         with Horizontal(id="body"):
-            yield VerticalScroll(id="chat")
-            with VerticalScroll(id="sidebar"):
-                yield Static("会话统计", id="sidebar-title", classes="section-title")
-                yield Static("", id="session", markup=False)
-                yield Static("执行环境", classes="section-title")
-                yield Static("", id="features", markup=False)
-                yield Static("后台队友", classes="section-title")
-                yield Static("", id="team", markup=False)
-        yield Static("就绪 · 输入任务即可开始", id="status", markup=False)
-        with Vertical(id="input-area"):
-            yield Prompt(id="prompt", placeholder="输入一个明确的任务…", highlight_cursor_line=False)
-            yield Static("Enter 发送   Ctrl+J 换行   Ctrl+P/N 历史   :help 命令", id="hint", markup=False)
+            with Vertical(id="main"):
+                yield VerticalScroll(id="chat")
+                yield Static("上下文估计 · 等待首轮请求", id="context-compact", markup=False)
+                yield Static("就绪 · 输入任务即可开始", id="status", markup=False)
+                with Vertical(id="input-area"):
+                    yield Prompt(id="prompt", placeholder="输入一个明确的任务…", highlight_cursor_line=False)
+                    yield Static("Enter 发送   Ctrl+J 换行   Ctrl+P/N 历史   :help 命令", id="hint", markup=False)
+            with Vertical(id="sidebar"):
+                with VerticalScroll(id="sidebar-details"):
+                    yield Static("会话累计", id="sidebar-title", classes="section-title")
+                    yield Static("", id="session", markup=False)
+                    yield Static("执行环境", classes="section-title")
+                    yield Static("", id="features", markup=False)
+                    yield Static("后台队友", classes="section-title")
+                    yield Static("", id="team", markup=False)
+                yield Static("上下文估计 · token\n等待首轮请求", id="context-usage", markup=False)
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -204,6 +210,14 @@ class HarnessApp(App[int]):
         self.set_interval(0.5, self.update_sidebar)
         self.query_one("#prompt", Prompt).focus()
         self.query_one("#prompt", Prompt).border_title = "任务"
+        context_tooltip = (
+            "最近一次主 Agent 请求的输入估计，包含系统提示词、历史消息和工具定义，已加 20% 余量。"
+            "预算是压缩触发阈值，不是模型容量或累计账单；每次模型请求前更新。"
+            "提示词包含系统规则、计划、技能目录和注入的记忆；工具定义是名称、说明和参数格式；"
+            "对话消息包含用户、助手、思考和工具调用，工具结果块单独统计，JSON 结构也计入。"
+        )
+        self.query_one("#context-usage").tooltip = context_tooltip
+        self.query_one("#context-compact").tooltip = context_tooltip
         # Follow layout growth, including delayed Markdown rendering. Textual
         # releases this anchor when the user scrolls and restores it at bottom.
         self.query_one("#chat", VerticalScroll).anchor()
@@ -276,6 +290,8 @@ class HarnessApp(App[int]):
             self.model_panes.clear()
             self.tools.clear()
             self.tool_arguments.clear()
+            self.context_usage = None
+            self.update_context_usage()
             self.query_one("#prompt", Prompt).clear()
             self.query_one("#chat", VerticalScroll).scroll_end(animate=False)
             return
@@ -345,7 +361,11 @@ class HarnessApp(App[int]):
             if isinstance(event, ApprovalRequest):
                 self.pending.append(event)
                 continue
-            if event.kind == "model_start":
+            if event.kind == "context_usage":
+                if event.owner == "lead":
+                    self.context_usage = dict(event.data)
+                    self.update_context_usage()
+            elif event.kind == "model_start":
                 self.query_one("#status", Static).update(f"{plain(event.owner)} · 第 {event.data['round']} 轮 · 等待模型输出…")
             elif event.kind in ("text_delta", "model_end"):
                 pane = self.model_panes.get(event.call_id)
@@ -424,6 +444,43 @@ class HarnessApp(App[int]):
 
     def teammates_alive(self) -> bool:
         return bool(self.runtime.teams and any(t.alive for t in list(self.runtime.teams.teammates.values())))
+
+    def update_context_usage(self) -> None:
+        widget = self.query_one("#context-usage", Static)
+        compact_widget = self.query_one("#context-compact", Static)
+        for item in (widget, compact_widget):
+            item.remove_class("near-budget", "over-budget")
+        if self.context_usage is None:
+            widget.update("上下文估计 · token\n等待首轮请求")
+            compact_widget.update("上下文估计 · 等待首轮请求")
+            return
+        tokens = self.context_usage["estimated_input_tokens"]
+        limit = self.context_usage.get("input_token_limit")
+        text = Text("上下文估计 · token\n最近请求")
+        if limit is None:
+            text.append(f"\n已用  ≈{tokens:,}", style="bold")
+            text.append("\n自动压缩已关闭")
+            compact = Text(f"上下文估计 ≈{tokens:,} token · 自动压缩已关闭")
+        else:
+            remaining = max(0, limit - tokens)
+            text.append(f" · 占用 {tokens / limit:.1%}")
+            text.append(f"\n已用  ≈{tokens:,}", style="bold")
+            text.append(f"\n预算   {limit:,}\n剩余  ≈{remaining:,}")
+            compact = Text(f"上下文估计 ≈{tokens:,}/{limit:,} · 剩余 ≈{remaining:,} · {tokens / limit:.1%}")
+            if tokens > limit:
+                text.append(f"\n超出预算 {tokens - limit:,}")
+                compact.append(f" · 超出 {tokens - limit:,}")
+            for item in (widget, compact_widget):
+                item.set_class(tokens >= limit * 0.9, "near-budget")
+                item.set_class(tokens > limit, "over-budget")
+        breakdown = self.context_usage.get("estimated_input_token_breakdown")
+        if breakdown is not None:
+            for key, label in (("system_prompt", "提示词"), ("tool_definitions", "工具定义"),
+                               ("tool_results", "工具结果"), ("conversation", "对话消息"),
+                               ("request_structure", "请求结构")):
+                text.append(f"\n{label}  ≈{breakdown[key]:,}")
+        widget.update(text)
+        compact_widget.update(compact)
 
     def update_sidebar(self) -> None:
         if self.shutdown.is_set() or not self.query("#session"):

@@ -20,7 +20,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from ..shell import decode_shell_output, shell_guidance, shell_name
+from ..shell import decode_shell_output, noninteractive_process_options, shell_guidance, shell_name
 from .registry import ToolContext, ToolRegistry
 from .result import ToolError, ToolResult, tool_error
 
@@ -118,7 +118,8 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
                 cwd=str(ctx.workdir),
                 capture_output=True,
                 env=child_env,
-                timeout=timeout
+                timeout=timeout,
+                **noninteractive_process_options(),
             )
     except (subprocess.TimeoutExpired, TimeoutError):
         return tool_error(

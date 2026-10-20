@@ -33,7 +33,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable
 
-from .context import COMPACT_FLAG, ContextCompactor, is_prompt_too_long
+from .context import COMPACT_FLAG, ContextBudgetError, ContextCompactor, is_prompt_too_long
 from .diagnostics import RunTrace, traced_loop
 from .events import POST_TOOL_USE, PRE_TOOL_USE, STOP, Hooks, StopDirective
 from .llm import LLMClient, extract_text, make_tool_result, tool_use_blocks
@@ -42,6 +42,7 @@ from .tools.feedback import CommandFeedback
 from .tools.result import ToolResult
 from .tools.recovery import ToolRecovery
 from .ui_events import UIEvent
+from .token_budget import ESTIMATOR_ID, estimate_request_breakdown, estimate_request_tokens
 
 MAX_REACTIVE_RETRIES = 1
 MAX_INCOMPLETE_RETRIES = 2
@@ -197,13 +198,6 @@ def run_loop(
         if before_call is not None:
             before_call(messages)  # 每轮先补充新消息
 
-        # -- layer 1: make room before asking -------------------------------
-        if compactor is not None:
-            messages[:] = compactor.prepare(messages, active_request) # 正常的预防性压缩
-        if isinstance(trace, RunTrace):
-            trace.record("context_prepared", message_count=len(messages),
-                         context_chars=ContextCompactor.estimate_chars(messages))
-
         system_prompt = system() if callable(system) else system # 因此 system prompt 能够随运行状态动态更新。工具
         if recovery_note:
             system_prompt += "\n\n" + recovery_note
@@ -215,6 +209,35 @@ def run_loop(
         # pool computed once up front would let the model *execute* a tool it
         # was never *offered*.  Re-reading here is what makes the pool dynamic.
         tools = registry.definitions()
+
+        # Budget the same system/messages/tools that this call will send.
+        input_tokens_before = estimate_request_tokens(system_prompt, messages, tools) if isinstance(trace, RunTrace) else None
+        if compactor is not None:
+            try:
+                messages[:] = compactor.prepare(messages, active_request, system=system_prompt, tools=tools)
+            except ContextBudgetError as exc:
+                result.stop_reason = "error"
+                result.error = str(exc)
+                progress(f"[model] round {turn}: context budget configuration failed")
+                return result
+        input_token_limit = compactor.CONTEXT_TOKEN_LIMIT if compactor and compactor.enabled else None
+        token_breakdown = (
+            estimate_request_breakdown(system_prompt, messages, tools)
+            if isinstance(trace, RunTrace) or ctx.extra.get("ui_events") else None
+        )
+        prepared_input_tokens = sum(token_breakdown.values()) if token_breakdown is not None else None
+        if isinstance(trace, RunTrace):
+            trace.record("context_prepared", message_count=len(messages),
+                         context_chars=ContextCompactor.estimate_chars(messages),
+                         estimated_input_tokens_before=input_tokens_before,
+                         estimated_input_tokens=prepared_input_tokens,
+                         estimated_input_token_breakdown=token_breakdown,
+                         token_estimator=ESTIMATOR_ID,
+                         input_token_limit=input_token_limit)
+        if prepared_input_tokens is not None:
+            ui("context_usage", estimated_input_tokens=prepared_input_tokens,
+               estimated_input_token_breakdown=token_breakdown,
+               input_token_limit=input_token_limit, token_estimator=ESTIMATOR_ID)
 
         # -- the model call, with one reactive retry ------------------------
         progress(f"[model] round {turn}: waiting for response")

@@ -209,8 +209,8 @@ class DiagnosticTests(HarnessCase):
 
     def test_summary_calls_are_included(self):
         runtime = self.make_runtime(script=["brief summary", "done"], teams_enabled=False)
-        runtime.messages.append({"role": "user", "content": "x" * 5000})
-        with patch.object(ContextCompactor, "CONTEXT_CHAR_LIMIT", 1000):
+        runtime.messages.append({"role": "user", "content": "x" * 50_000})
+        with patch.object(ContextCompactor, "CONTEXT_TOKEN_LIMIT", 15_000):
             runtime.submit("finish")
         self.assertEqual(runtime.diagnostics.summary()["model_calls_by_kind"], {"summary": 1, "agent": 1})
 

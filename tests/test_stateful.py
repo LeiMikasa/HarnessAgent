@@ -241,7 +241,7 @@ class CompactionTests(HarnessCase):
 
     def test_large_results_are_persisted_with_a_preview(self):
         compactor = self.compactor()
-        output = "y" * (compactor.LARGE_RESULT_CHAR_LIMIT + 100)
+        output = "y" * (compactor.LARGE_RESULT_TOKEN_LIMIT * 3)
         stub = compactor.persist_large_output("toolu_1", output)
         self.assertIn("<persisted-output>", stub)
         self.assertIn("Preview:", stub)
@@ -258,14 +258,14 @@ class CompactionTests(HarnessCase):
 
     def test_tool_result_budget_persists_only_the_oversized(self):
         compactor = self.compactor()
-        big = "z" * (compactor.LARGE_RESULT_CHAR_LIMIT + 5_000)
+        big = "z" * (compactor.LARGE_RESULT_TOKEN_LIMIT * 3)
         small = "s" * 500
         messages = [
             {"role": "user", "content": "go"},
             {"role": "assistant", "content": [tool_use("a"), tool_use("b")]},
             {"role": "user", "content": [tool_result("a", big), tool_result("b", small)]},
         ]
-        compactor.tool_result_budget(messages, max_chars=1_000)
+        compactor.tool_result_budget(messages, max_tokens=1_000)
         blocks = messages[-1]["content"]
         self.assertIn("<persisted-output>", blocks[0]["content"])
         self.assertEqual(blocks[1]["content"], small)
@@ -349,7 +349,7 @@ class CompactionTests(HarnessCase):
 
     def test_micro_compact_protects_unseen_and_recent(self):
         compactor = self.compactor()
-        long_text = "L" * (compactor.MICRO_COMPACT_MIN_CHARS + 500)
+        long_text = "L" * (compactor.MICRO_COMPACT_MIN_TOKENS * 4)
         messages: list[dict] = [{"role": "user", "content": "start"}]
         for index in range(compactor.KEEP_RECENT_RESULTS + 3):
             messages.append({"role": "assistant", "content": [tool_use(f"t{index}")]})
@@ -377,7 +377,7 @@ class CompactionTests(HarnessCase):
 
     def test_micro_compact_does_not_recount_existing_pointer(self):
         compactor = self.compactor()
-        compactor.MICRO_COMPACT_MIN_CHARS = 1
+        compactor.MICRO_COMPACT_MIN_TOKENS = 1
         saved = compactor.save_output("old", "original evidence")
         pointer = f"[Earlier tool result saved at {saved}]"
         messages = [{"role": "user", "content": [tool_result("old", pointer)]}]
@@ -385,8 +385,8 @@ class CompactionTests(HarnessCase):
             messages.append({"role": "user", "content": [tool_result(f"recent{index}", "small")]})
         messages.append({"role": "assistant", "content": "continue"})
 
-        compactor.micro_compact(messages, target_chars=0)
-        compactor.micro_compact(messages, target_chars=0)
+        compactor.micro_compact(messages, target_tokens=0)
+        compactor.micro_compact(messages, target_tokens=0)
 
         self.assertEqual(messages[0]["content"][0]["content"], pointer)
         self.assertEqual(saved.read_text(encoding="utf-8"), "original evidence")
@@ -404,7 +404,7 @@ class CompactionTests(HarnessCase):
             ])
         messages.append({"role": "assistant", "content": "continue"})
         self.assertGreater(compactor.estimate_chars(messages), 80_000)
-        self.assertLess(compactor.estimate_chars(messages), compactor.CONTEXT_CHAR_LIMIT)
+        self.assertLess(compactor.estimate_request_tokens("", messages), compactor.CONTEXT_TOKEN_LIMIT)
 
         result = compactor.prepare(messages, "finish the task")
 
@@ -413,8 +413,10 @@ class CompactionTests(HarnessCase):
 
     def test_prepare_preserves_later_evidence_in_fresh_large_result_preview(self):
         compactor = self.compactor()
+        # Exercise stage 4 with a small fixture, independently of the default budget.
+        compactor.CONTEXT_TOKEN_LIMIT = 80_000
         evidence = "confirmed api_port=8081"
-        output = "noise " * 500 + evidence + " tail" * 40_000
+        output = "noise " * 500 + evidence + " tail" * 60_000
         messages = [{"role": "user", "content": "inspect"},
                     {"role": "assistant", "content": [tool_use("fresh")]},
                     {"role": "user", "content": [tool_result("fresh", output)]}]
@@ -426,7 +428,7 @@ class CompactionTests(HarnessCase):
         self.assertIn("<persisted-output>", preview)
         saved = compactor.persisted_output_path(preview)
         self.assertEqual(Path(saved).read_text(encoding="utf-8"), output)
-        self.assertLessEqual(compactor.estimate_chars(result), compactor.CONTEXT_CHAR_LIMIT)
+        self.assertLessEqual(compactor.estimate_request_tokens("", result), compactor.CONTEXT_TOKEN_LIMIT)
         self.assertFalse(any("summary" in note for note in compactor.notes))
 
     def test_fit_tool_results_touches_unseen_results(self):
@@ -437,7 +439,7 @@ class CompactionTests(HarnessCase):
             {"role": "assistant", "content": [tool_use("t")]},
             {"role": "user", "content": [tool_result("t", big)]},
         ]
-        compactor.fit_tool_results(messages, target_chars=200)
+        compactor.fit_tool_results(messages, target_tokens=200)
         self.assertLess(len(messages[-1]["content"][0]["content"]), len(big))
 
     def test_compact_history_yields_one_summary_message(self):
@@ -462,9 +464,11 @@ class CompactionTests(HarnessCase):
 
     def test_summary_input_is_clipped(self):
         compactor = self.compactor()
-        messages = [{"role": "user", "content": "q" * 200_000}]
+        messages = [{"role": "user", "content": "q" * 300_000}]
         clipped = compactor.summary_input(messages)
-        self.assertLessEqual(len(clipped), compactor.SUMMARY_INPUT_CHAR_LIMIT + 100)
+        self.assertLessEqual(compactor.estimate_request_tokens(
+            compactor.SUMMARIZER_SYSTEM, [{"role": "user", "content": clipped}]
+        ), compactor.SUMMARY_INPUT_TOKEN_LIMIT)
         self.assertIn("middle omitted", clipped)
 
     def test_prepare_only_snips_below_the_limit(self):
@@ -476,7 +480,7 @@ class CompactionTests(HarnessCase):
 
     def test_prepare_summarizes_when_over_the_limit(self):
         compactor = self.compactor(script=["Heavy summary."])
-        compactor.CONTEXT_CHAR_LIMIT = 500
+        compactor.CONTEXT_TOKEN_LIMIT = 500
         messages = [{"role": "user", "content": "q" * 2_000} for _ in range(6)]
         result = compactor.prepare(messages, "request")
         self.assertEqual(len(result), 1)

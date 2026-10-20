@@ -4,7 +4,21 @@ from __future__ import annotations
 
 import locale
 import os
+import subprocess
 import sys
+
+
+def noninteractive_process_options(*, input_provided: bool = False) -> dict:
+    """Keep tool processes away from the TUI's input and Windows console.
+
+    Capturing stdout/stderr alone does not detach a Windows child. cmd.exe can
+    re-enable echo/line input on the shared console, exposing SGR mouse reports.
+    Explicit input (such as Docker's JSON requests) still uses its own pipe.
+    """
+    options = {} if input_provided else {"stdin": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return options
 
 
 def shell_name() -> str:

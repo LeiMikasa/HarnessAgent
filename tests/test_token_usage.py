@@ -87,9 +87,9 @@ class TokenUsageTests(HarnessCase):
 
         results = []
         # This test verifies summary usage export with a fixed 90k history,
-        # independently of the larger production compaction threshold.
+        # independently of the larger production estimated-token threshold.
         with patch("evals.context_compaction.FixtureMockLLM", UsageMock), \
-                patch.object(ContextCompactor, "CONTEXT_CHAR_LIMIT", 80_000):
+                patch.object(ContextCompactor, "CONTEXT_TOKEN_LIMIT", 28_000):
             for mode in ("full", "compact"):
                 run_dir = self.tmp / mode
                 run_dir.mkdir()

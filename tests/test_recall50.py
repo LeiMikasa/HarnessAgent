@@ -42,19 +42,22 @@ class Recall50Tests(HarnessCase):
             self.assertGreater(len({s["history_pairs"] for s in group}), 1)
             self.assertGreater(len({s["result_chars"] for s in group}), 1)
             self.assertGreater(len({s["ordinary_chars"] for s in group}), 1)
-        char_triggers = message_triggers = 0
+        # The published dataset's pressure mix uses its original reference budget,
+        # independently of later runtime-default tuning. Do not regenerate cases.
+        reference_token_limit = 80_000
+        token_triggers = message_triggers = 0
         summary_triggers = []
         for spec in specs:
             case = materialize(spec)
             messages = [*case["history"], {"role": "user", "content": case["prompt"]}]
-            over_chars = ContextCompactor.estimate_chars(messages) > ContextCompactor.CONTEXT_CHAR_LIMIT
+            over_tokens = ContextCompactor.estimate_request_tokens("", messages) > reference_token_limit
             over_messages = len(messages) > ContextCompactor.SNIP_MAX_MESSAGES
-            char_triggers += over_chars
+            token_triggers += over_tokens
             message_triggers += over_messages
             if spec["family"] == "summary":
-                summary_triggers.append(over_chars)
-        self.assertGreater(char_triggers, 0)
-        self.assertLess(char_triggers, len(specs))
+                summary_triggers.append(over_tokens)
+        self.assertGreater(token_triggers, 0)
+        self.assertLess(token_triggers, len(specs))
         self.assertGreater(message_triggers, 0)
         self.assertLess(message_triggers, len(specs))
         self.assertIn(True, summary_triggers)
@@ -129,7 +132,7 @@ class Recall50Tests(HarnessCase):
         records = []
         spec = next(s for s in load_specs() if s["family"] == "summary" and s["placement"] == "middle"
                     and s["pressure"] == "high")
-        spec = {**spec, "ordinary_chars": ContextCompactor.CONTEXT_CHAR_LIMIT + 40_000}
+        spec = {**spec, "ordinary_chars": ContextCompactor.CONTEXT_TOKEN_LIMIT * 4}
         for mode in ("full", "compact"):
             path = self.tmp / mode
             path.mkdir()
@@ -223,7 +226,7 @@ class Recall50Tests(HarnessCase):
 
         spec = next(s for s in load_specs() if s["family"] == "summary" and s["placement"] == "middle"
                     and s["pressure"] == "high")
-        spec = {**spec, "ordinary_chars": ContextCompactor.CONTEXT_CHAR_LIMIT + 40_000}
+        spec = {**spec, "ordinary_chars": ContextCompactor.CONTEXT_TOKEN_LIMIT * 4}
         records = []
         with patch("evals.recall50.SuiteMockLLM", UsageMock):
             for mode in ("full", "compact"):

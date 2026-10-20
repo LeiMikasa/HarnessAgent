@@ -17,6 +17,16 @@ class SandboxFileToolTests(HarnessCase):
     def execute(self, tool, **args):
         return ToolResult(**worker.execute(tool, args, self.tmp))
 
+    def test_docker_client_has_no_inherited_input_and_keeps_json_stdin(self):
+        box = DockerSandbox(str(self.tmp))
+        with patch("agent.sandbox.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            box._docker(["version"])
+            self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+            request = '{"path":"a.txt"}'
+            box._docker(["exec", "-i", "fixture"], input_text=request)
+            self.assertNotIn("stdin", run.call_args.kwargs)
+            self.assertEqual(run.call_args.kwargs["input"], request)
+
     def test_edit_exact_text_and_replace_all(self):
         path = self.write("nested/config.txt", "端口=8080\nname=A\nname=A")
         result = self.execute("edit_file", path="nested/config.txt",

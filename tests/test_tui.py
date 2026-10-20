@@ -7,11 +7,13 @@ from unittest.mock import patch
 
 from textual.containers import VerticalScroll
 from textual.events import Paste
+from textual.widgets import Static
 
 from common import HarnessCase
 from agent.permissions import Rule
 from agent.tui import ApprovalScreen, HarnessApp, MessagePane, Prompt
 from agent.ui_events import UIEvent
+from agent.token_budget import estimate_request_breakdown, estimate_request_tokens
 
 
 class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
@@ -101,6 +103,7 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
             await self.until(pilot, lambda: "worker-id" in app.model_panes)
             self.assertEqual(app.model_panes["worker-id"].text, "队友内容")
             self.assertEqual(app.last_final, "done")
+            self.assertGreater(app.context_usage["estimated_input_token_breakdown"]["tool_results"], 0)
 
     async def approval_case(self, allow):
         runtime = self.make_runtime(script=[{"tool": "guarded", "input": {}}, "done"], teams_enabled=False)
@@ -148,6 +151,90 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime.llm.calls, [])
             self.assertTrue(app.query_one(Prompt).is_on_screen)
 
+    async def test_context_budget_displays_remaining_and_ignores_teammates(self):
+        runtime = self.make_runtime(teams_enabled=False)
+        app = HarnessApp(runtime)
+        async with app.run_test(size=(80, 24)) as pilot:
+            usage = app.query_one("#context-usage", Static)
+            compact_usage = app.query_one("#context-compact", Static)
+            self.assertIn("等待首轮请求", str(usage.render()))
+            app.receive_event(UIEvent("context_usage", data={
+                "estimated_input_tokens": 45_000, "input_token_limit": 200_000,
+                "estimated_input_token_breakdown": {
+                    "system_prompt": 2000, "tool_definitions": 3000, "tool_results": 30_000,
+                    "conversation": 9990, "request_structure": 10,
+                },
+            }))
+            await self.until(pilot, lambda: app.context_usage is not None)
+            text = str(usage.render())
+            for value in ("最近请求", "45,000", "200,000", "155,000", "22.5%"):
+                self.assertIn(value, text)
+            for value in ("提示词  ≈2,000", "工具定义  ≈3,000", "工具结果  ≈30,000",
+                          "对话消息  ≈9,990", "请求结构  ≈10"):
+                self.assertIn(value, text)
+            app.receive_event(UIEvent("context_usage", "worker", data={
+                "estimated_input_tokens": 100, "input_token_limit": 1000,
+            }))
+            await app.drain_events()
+            self.assertEqual(app.context_usage["estimated_input_tokens"], 45_000)
+            await pilot.resize_terminal(60, 18)
+            await pilot.pause()
+            self.assertTrue(compact_usage.is_on_screen)
+            self.assertFalse(usage.is_on_screen)
+            self.assertTrue(app.query_one(Prompt).is_on_screen)
+            self.assertLessEqual(compact_usage.region.bottom, app.query_one(Prompt).region.y)
+            await pilot.resize_terminal(100, 24)
+            await pilot.pause()
+            self.assertTrue(usage.is_on_screen)
+            self.assertEqual(usage.region.bottom, app.query_one("#sidebar").region.bottom)
+            self.assertGreaterEqual(usage.region.x, app.query_one(Prompt).region.right)
+            await app.submit(":clear")
+            self.assertIsNone(app.context_usage)
+            self.assertIn("等待首轮请求", str(usage.render()))
+            self.assertEqual(runtime.llm.calls, [])
+
+    async def test_context_budget_handles_overflow_and_disabled_compaction(self):
+        runtime = self.make_runtime(teams_enabled=False)
+        app = HarnessApp(runtime)
+        async with app.run_test(size=(120, 40)) as pilot:
+            usage = app.query_one("#context-usage", Static)
+            app.receive_event(UIEvent("context_usage", data={
+                "estimated_input_tokens": 220_000, "input_token_limit": 200_000,
+            }))
+            await app.drain_events()
+            self.assertIn("剩余  ≈0", str(usage.render()))
+            self.assertIn("110.0%", str(usage.render()))
+            self.assertIn("超出预算 20,000", str(usage.render()))
+            self.assertTrue(usage.has_class("over-budget"))
+            await pilot.pause()
+            self.assertGreaterEqual(usage.region.x, app.query_one(Prompt).region.right)
+            self.assertEqual(usage.region.bottom, app.query_one("#sidebar").region.bottom)
+            app.receive_event(UIEvent("context_usage", data={
+                "estimated_input_tokens": 220_000, "input_token_limit": None,
+            }))
+            await app.drain_events()
+            self.assertIn("自动压缩已关闭", str(usage.render()))
+            self.assertNotIn("剩余", str(usage.render()))
+            self.assertFalse(usage.has_class("over-budget"))
+
+    async def test_context_budget_uses_the_request_after_compaction(self):
+        runtime = self.make_runtime(script=["brief summary", "done"], teams_enabled=False)
+        runtime.compactor.CONTEXT_TOKEN_LIMIT = 15_000
+        runtime.messages.append({"role": "user", "content": "a" * 50_000})
+        app = HarnessApp(runtime, initial_request="finish")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.until(pilot, lambda: not app.busy and len(runtime.llm.calls) == 2)
+            call = runtime.llm.calls[-1]
+            self.assertEqual(app.context_usage["estimated_input_tokens"], estimate_request_tokens(
+                call["system"], call["messages"], call["tools"]
+            ))
+            self.assertEqual(app.context_usage["input_token_limit"], 15_000)
+            self.assertEqual(app.context_usage["estimated_input_token_breakdown"], estimate_request_breakdown(
+                call["system"], call["messages"], call["tools"]
+            ))
+            self.assertLess(app.context_usage["estimated_input_tokens"], 15_000)
+            self.assertIn("[Compacted]", str(call["messages"]))
+
     async def test_theme_and_resize_preserve_unicode_draft_and_focus(self):
         runtime = self.make_runtime(teams_enabled=False)
         app = HarnessApp(runtime)
@@ -170,6 +257,7 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertTrue(app.query_one("#minimum-size").is_on_screen)
             self.assertFalse(app.query_one("#body").display)
+            self.assertFalse(app.query_one("#context-usage").is_on_screen)
             await pilot.resize_terminal(120, 40)
             await pilot.press("ctrl+t")
             self.assertEqual(app.theme, "harness-dark")
