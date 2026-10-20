@@ -11,11 +11,15 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from rich.markup import escape
+from rich.table import Table
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Resize
 from textual.message import Message
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import Button, Collapsible, Footer, Markdown, Static, TextArea
 
 from .runtime import Runtime
@@ -123,40 +127,29 @@ class HarnessApp(App[int]):
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [Binding("ctrl+c", "stop", "停止", priority=True),
                 Binding("ctrl+q", "request_quit", "退出", priority=True),
-                Binding("ctrl+l", "focus_prompt", "输入", priority=True)]
-    CSS = """
-    Screen { background: #10141c; color: #dce4ef; }
-    #top { height: 4; padding: 0 2; border-bottom: solid #29354a; }
-    #brand { height: 1; color: #82d8ce; text-style: bold; }
-    #workspace { height: 2; color: #8e9db3; }
-    #body { height: 1fr; }
-    #chat { width: 1fr; padding: 1 2; scrollbar-size: 1 1; }
-    #sidebar { width: 29; border-left: solid #29354a; padding: 1; }
-    #sidebar-title { height: 2; color: #82d8ce; text-style: bold; }
-    #session, #team { height: auto; margin-bottom: 1; color: #a9b8cb; }
-    #status { height: 1; margin: 0 2; color: #e8bf7a; }
-    #input-area { height: 7; padding: 0 2; }
-    #prompt { height: 5; border: round #466879; background: #151d29; }
-    #prompt:focus { border: round #82d8ce; }
-    #hint { height: 1; color: #8e9db3; }
-    Footer { background: #151d29; }
-    .message { height: auto; margin-bottom: 1; padding: 0 1; border-left: solid #35465d; }
-    .message.user { border-left: solid #82d8ce; background: #151d29; }
-    .message.notice { border-left: solid #d7ae70; }
-    .message-heading { height: 1; color: #82d8ce; text-style: bold; }
-    Markdown { margin: 0; padding: 0; background: transparent; }
-    .tool { height: auto; padding: 0; margin: 0 0 1 0; background: #151d29; border: none; }
-    .tool.failed { border-left: solid #ec8e8e; }
-    ApprovalScreen { align: center middle; background: #000000 60%; }
-    #approval-box { width: 76; max-width: 95%; height: auto; max-height: 85%; padding: 1 2; border: round #e8bf7a; background: #182231; }
-    #approval-heading { height: 2; text-style: bold; color: #e8bf7a; }
-    #approval-preview { max-height: 14; height: auto; margin: 1 0; }
-    #approval-buttons { height: 3; align-horizontal: right; }
-    #approval-buttons Button { margin-left: 1; }
-    """
+                Binding("ctrl+l", "focus_prompt", "输入", priority=True),
+                Binding("ctrl+t", "toggle_theme", "主题", priority=True)]
+    CSS_PATH = "tui.tcss"
 
     def __init__(self, runtime: Runtime, *, initial_request: str = "", show_details: bool = False):
         super().__init__()
+        self.register_theme(Theme(
+            name="harness-dark", primary="#d8b485", secondary="#a4afa7", accent="#91c9b2",
+            foreground="#e4e8e1", background="#141816", surface="#1c221e", panel="#252d27",
+            success="#91c9b2", warning="#d8b485", error="#e4a09a", dark=True,
+            variables={"border": "#3b493f", "border-blurred": "#2b352e",
+                       "footer-background": "#141816", "footer-key-foreground": "#91c9b2",
+                       "input-cursor-background": "#91c9b2", "input-cursor-foreground": "#141816"},
+        ))
+        self.register_theme(Theme(
+            name="harness-light", primary="#805e37", secondary="#52665b", accent="#2c7056",
+            foreground="#28352d", background="#f5f3ed", surface="#eceee6", panel="#e0e5da",
+            success="#2c7056", warning="#805e37", error="#ac433d", dark=False,
+            variables={"border": "#a6b5a6", "border-blurred": "#d0d7ca",
+                       "footer-background": "#f5f3ed", "footer-key-foreground": "#2c7056",
+                       "input-cursor-background": "#2c7056", "input-cursor-foreground": "#ffffff"},
+        ))
+        self.theme = "harness-dark"
         self.runtime = runtime
         self.initial_request, self.show_details = initial_request, show_details
         self.events: queue.SimpleQueue = queue.SimpleQueue()
@@ -180,19 +173,26 @@ class HarnessApp(App[int]):
         self.started_at: float | None = None
 
     def compose(self) -> ComposeResult:
+        yield Static("窗口过小\n请调整到至少 60 列 × 18 行\nCtrl+Q 退出", id="minimum-size", markup=False)
         with Vertical(id="top"):
-            yield Static(f"HARNESS AGENT  /  {plain(self.runtime.settings.model)}", id="brand", markup=False)
-            yield Static(f"工作区  {plain(self.runtime.settings.workdir)}", id="workspace", markup=False)
+            with Horizontal(id="header-line"):
+                yield Static("HARNESS  /  coding agent", id="brand", markup=False)
+                yield Static(Text(plain(self.runtime.settings.model), no_wrap=True, overflow="ellipsis"), id="model")
+                yield Static("● 就绪", id="activity", markup=False)
+            yield Static(Text("工作区  " + plain(self.runtime.settings.workdir), no_wrap=True, overflow="ellipsis"), id="workspace")
         with Horizontal(id="body"):
             yield VerticalScroll(id="chat")
-            with Vertical(id="sidebar"):
-                yield Static("会话状态", id="sidebar-title")
+            with VerticalScroll(id="sidebar"):
+                yield Static("会话统计", id="sidebar-title", classes="section-title")
                 yield Static("", id="session", markup=False)
+                yield Static("执行环境", classes="section-title")
+                yield Static("", id="features", markup=False)
+                yield Static("后台队友", classes="section-title")
                 yield Static("", id="team", markup=False)
-        yield Static("就绪", id="status", markup=False)
+        yield Static("就绪 · 输入任务即可开始", id="status", markup=False)
         with Vertical(id="input-area"):
-            yield Prompt(id="prompt", placeholder="输入任务，或 :help 查看命令", highlight_cursor_line=False)
-            yield Static("Enter 发送 · Alt+Enter / Ctrl+J 换行 · Ctrl+P/N 历史 · Ctrl+C 停止", id="hint")
+            yield Prompt(id="prompt", placeholder="输入一个明确的任务…", highlight_cursor_line=False)
+            yield Static("Enter 发送   Ctrl+J 换行   Ctrl+P/N 历史   :help 命令", id="hint", markup=False)
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -203,17 +203,33 @@ class HarnessApp(App[int]):
         self.set_interval(0.05, self.drain_events)
         self.set_interval(0.5, self.update_sidebar)
         self.query_one("#prompt", Prompt).focus()
+        self.query_one("#prompt", Prompt).border_title = "任务"
         # Follow layout growth, including delayed Markdown rendering. Textual
         # releases this anchor when the user scrolls and restores it at bottom.
         self.query_one("#chat", VerticalScroll).anchor()
         self.update_sidebar()
-        await self.add_message("开始工作", "直接输入任务即可。工具结果可以点击展开；审批会在确认窗口中显示。", "notice")
+        self.on_resize()
+        await self.add_message(
+            "准备就绪",
+            "### 从一个明确的任务开始。\n\n"
+            "告诉我目标、相关文件和验收条件。\n"
+            "我会执行工具、展示过程，并在需要时请求你的确认。\n\n"
+            "**试试**  检查项目并修复失败的测试\n\n"
+            "`:tools` 查看工具  ·  `:todos` 当前计划  ·  `:trace` 运行记录",
+            "welcome",
+        )
         if self.initial_request:
             await self.submit(self.initial_request)
 
-    def on_resize(self) -> None:
+    def on_resize(self, event: Resize | None = None) -> None:
         if self.is_mounted and self.query("#sidebar"):
-            self.query_one("#sidebar").display = self.size.width >= 100
+            # The resize message can arrive before App.size has been updated.
+            size = event.size if event is not None else self.size
+            self.query_one("#sidebar").display = size.width >= 100
+            screen = self.query_one("#top").screen
+            screen.set_class(size.width < 100, "compact")
+            screen.set_class(size.height < 30, "short")
+            screen.set_class(size.width < 60 or size.height < 18, "too-small")
 
     def receive_event(self, event: UIEvent) -> None:
         self.local.owner = event.owner
@@ -263,6 +279,8 @@ class HarnessApp(App[int]):
             self.query_one("#prompt", Prompt).clear()
             self.query_one("#chat", VerticalScroll).scroll_end(animate=False)
             return
+        for welcome in self.query(".welcome"):
+            await welcome.remove()
         self.history.append(text)
         self.history_index = len(self.history)
         self.query_one("#prompt", Prompt).clear()
@@ -349,9 +367,10 @@ class HarnessApp(App[int]):
             elif event.kind == "tool_start":
                 args = event.data.get("arguments", {})
                 summary = next((str(args[field]) for field in ("path", "command", "to", "task_id") if isinstance(args, dict) and field in args), "")
-                title = f"{event.owner} / {event.text}" + (f" · {summary[:100]}" if summary else "")
+                owner = "" if event.owner == "lead" else f"{event.owner} / "
+                title = owner + event.text + (f" · {summary[:100]}" if summary else "")
                 body = Static(plain(repr(args)[:3000]), markup=False)
-                card = Collapsible(body, title=escape("… " + plain(title)), collapsed=not self.show_details, classes="tool")
+                card = Collapsible(body, title=escape("… " + plain(title)), collapsed=not self.show_details, classes="tool running")
                 await chat.mount(card)
                 self.tools[event.call_id] = card, body, title
                 self.tool_arguments[event.call_id] = plain(repr(args)[:3000])
@@ -360,6 +379,7 @@ class HarnessApp(App[int]):
                 card, body, title = self.tools[event.call_id]
                 ok = event.data["ok"]
                 card.title = escape(f"{'✓' if ok else '×'} {plain(title)} · {event.data['elapsed']:.1f}s")
+                card.remove_class("running")
                 detail = self.tool_arguments[event.call_id] + "\n\n输出：\n" + plain(event.text)
                 if event.data.get("result_chars", len(event.text)) > len(event.text):
                     detail += f"\n…界面预览已截断；工具实际返回 {event.data['result_chars']} 字符。"
@@ -409,18 +429,37 @@ class HarnessApp(App[int]):
         if self.shutdown.is_set() or not self.query("#session"):
             return
         runtime = self.runtime
-        features = f"团队 {'开启' if runtime.teams else '关闭'}\n记忆 {'开启' if runtime.memory.enabled else '关闭'}"
-        if self.busy and self.started_at is not None:
-            features += f"\n本次耗时 {time.monotonic() - self.started_at:.1f} 秒"
+        metrics = []
         if runtime.diagnostics:
             summary = runtime.diagnostics.summary()
             counts = summary["counts"]
             tokens = summary["token_totals"]
-            features += f"\n\n模型调用 {counts.get('model_calls', 0)}\n工具调用 {counts.get('tool_calls', 0)}\n工具错误 {counts.get('tool_errors', 0)}"
-            features += f"\n\n输入 token {tokens['input_tokens'] if tokens['input_tokens'] is not None else '未知'}\n输出 token {tokens['output_tokens'] if tokens['output_tokens'] is not None else '未知'}"
-        self.query_one("#session", Static).update(features)
-        roster = runtime.teams.roster() if runtime.teams else "后台队友未开启\n使用 --teams 开启"
+            metrics = [("模型调用", f"{counts.get('model_calls', 0):,}"),
+                       ("工具调用", f"{counts.get('tool_calls', 0):,}"),
+                       ("工具错误", f"{counts.get('tool_errors', 0):,}"), ("", ""),
+                       ("输入 token", f"{tokens['input_tokens']:,}" if tokens['input_tokens'] is not None else "未知"),
+                       ("输出 token", f"{tokens['output_tokens']:,}" if tokens['output_tokens'] is not None else "未知")]
+        else:
+            metrics = [("诊断记录", "已关闭")]
+        if self.busy and self.started_at is not None:
+            metrics += [("", ""), ("本次耗时", f"{time.monotonic() - self.started_at:.0f} 秒")]
+        table = Table.grid(expand=True, padding=(0, 1))
+        table.add_column()
+        table.add_column(justify="right", style="bold")
+        for label, value in metrics:
+            table.add_row(label, value)
+        self.query_one("#session", Static).update(table)
+        approval = {"ask": "询问", "allow": "允许", "deny": "拒绝"}.get(runtime.permissions.approval, runtime.permissions.approval)
+        features = (f"工具环境  {'Docker' if runtime.sandbox_enabled else '本机'}\n"
+                    f"权限策略  {approval}\n团队协作  {'开启' if runtime.teams else '关闭'}\n"
+                    f"长期记忆  {'开启' if runtime.memory.enabled else '关闭'}")
+        self.query_one("#features", Static).update(features)
+        roster = runtime.teams.roster() if runtime.teams else "未开启\n--teams 可启用协作"
         self.query_one("#team", Static).update(plain(roster))
+        activity = self.query_one("#activity", Static)
+        activity.update("◌ 执行中" if self.busy else "● 就绪")
+        activity.set_class(self.busy, "working")
+        self.query_one("#status").set_class(self.busy, "working")
         self.query_one("#sidebar").display = self.size.width >= 100
 
     def move_history(self, direction: int) -> None:
@@ -433,6 +472,9 @@ class HarnessApp(App[int]):
 
     def action_focus_prompt(self) -> None:
         self.query_one("#prompt", Prompt).focus()
+
+    def action_toggle_theme(self) -> None:
+        self.theme = "harness-light" if self.theme == "harness-dark" else "harness-dark"
 
     def action_stop(self) -> None:
         if not self.busy and not self.teammates_alive():

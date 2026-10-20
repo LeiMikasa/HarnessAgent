@@ -1,0 +1,111 @@
+/* Shared theme tokens keep the same hierarchy in dark, light and mono modes. */
+Screen {
+    background: $background;
+    color: $text;
+}
+
+#top {
+    height: 4;
+    padding: 1 3 0 3;
+    border-bottom: solid $panel;
+}
+#header-line { height: 1; }
+#brand { width: 1fr; height: 1; color: $primary; text-style: bold; }
+#model { width: auto; max-width: 45%; height: 1; color: $text-muted; margin-right: 3; }
+#activity { width: 12; height: 1; text-align: right; color: $accent; }
+#activity.working { color: $warning; }
+#workspace { height: 1; color: $text-muted; }
+
+#body { height: 1fr; }
+#chat {
+    width: 1fr;
+    padding: 1 3;
+    scrollbar-size: 1 1;
+    scrollbar-color: $border;
+    scrollbar-color-hover: $accent;
+    scrollbar-background: $background;
+}
+#sidebar {
+    width: 27;
+    border-left: solid $panel;
+    padding: 1 2;
+    scrollbar-size: 1 1;
+}
+.section-title { height: 1; margin-bottom: 1; color: $primary; text-style: bold; }
+#session, #features, #team { height: auto; margin-bottom: 1; color: $text-muted; }
+
+.message { height: auto; margin-bottom: 1; padding: 0 1; }
+.message-heading { height: 1; color: $accent; text-style: bold; }
+.message.user { padding: 1 2; background: $surface; border-left: solid $primary; }
+.message.user .message-heading { color: $primary; }
+.message.notice { border-left: solid $warning; }
+.message.notice .message-heading { color: $warning; }
+.message.welcome { padding: 1 1 2 1; }
+.message.welcome .message-heading { color: $text-muted; text-style: none; }
+Markdown { margin: 0; padding: 0; background: transparent; }
+MarkdownH3 { margin: 1 0; color: $text; }
+MarkdownFence { background: $surface; border: none; padding: 1; }
+
+.tool {
+    height: auto;
+    padding: 0;
+    margin: 0 0 1 1;
+    background: transparent;
+    border: none;
+    border-left: solid $border-blurred;
+}
+.tool.running { border-left: solid $warning; }
+.tool.failed { border-left: solid $error; }
+.tool > CollapsibleTitle { padding: 0 1; color: $text-muted; background: transparent; }
+.tool.running > CollapsibleTitle { color: $warning; }
+.tool.failed > CollapsibleTitle { color: $text-error; }
+.tool > CollapsibleTitle:hover, .tool > CollapsibleTitle:focus {
+    background: $surface;
+    color: $text;
+}
+.tool > Contents { padding: 1 2; background: $surface; }
+
+#status { height: 1; margin: 0 3; color: $text-muted; }
+#status.working { color: $warning; }
+#input-area { height: 7; padding: 0 3; }
+#prompt {
+    height: 5;
+    padding: 0 1;
+    background: $surface;
+    color: $text;
+    border: round $border-blurred;
+    border-title-color: $text-muted;
+}
+#prompt:focus { border: round $accent; border-title-color: $accent; }
+#hint { height: 1; color: $text-muted; }
+Footer { background: $background; color: $text-muted; padding: 0 2; }
+FooterKey { background: transparent; color: $accent; }
+
+#minimum-size { display: none; height: 1fr; content-align: center middle; color: $text-muted; }
+Screen.compact #top { padding-left: 2; padding-right: 2; }
+Screen.compact #model { display: none; }
+Screen.compact #chat { padding-left: 2; padding-right: 2; }
+Screen.compact #input-area { padding-left: 2; padding-right: 2; }
+Screen.compact #status { margin-left: 2; margin-right: 2; }
+Screen.short #top { height: 3; padding-top: 0; }
+Screen.short #input-area { height: 5; }
+Screen.short #prompt { height: 3; }
+Screen.too-small #top, Screen.too-small #body,
+Screen.too-small #status, Screen.too-small #input-area { display: none; }
+Screen.too-small #minimum-size { display: block; }
+
+ApprovalScreen { align: center middle; background: $background 75%; }
+#approval-box {
+    width: 76;
+    max-width: 95%;
+    height: auto;
+    max-height: 90%;
+    padding: 1 3;
+    border: round $warning;
+    background: $surface;
+}
+#approval-heading { height: 2; text-style: bold; color: $warning; }
+#approval-preview { max-height: 12; height: auto; margin: 1 0; padding: 0 1; background: $background; }
+#approval-buttons { height: 3; align-horizontal: right; }
+#approval-buttons Button { margin-left: 1; }
+#allow { background: $accent; color: $background; text-style: bold; }

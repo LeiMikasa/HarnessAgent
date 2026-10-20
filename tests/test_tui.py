@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from textual.containers import VerticalScroll
+from textual.events import Paste
 
 from common import HarnessCase
 from agent.permissions import Rule
@@ -146,6 +147,36 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
             await self.until(pilot, lambda: not app.busy)
             self.assertEqual(runtime.llm.calls, [])
             self.assertTrue(app.query_one(Prompt).is_on_screen)
+
+    async def test_theme_and_resize_preserve_unicode_draft_and_focus(self):
+        runtime = self.make_runtime(teams_enabled=False)
+        app = HarnessApp(runtime)
+        async with app.run_test(size=(120, 40)) as pilot:
+            prompt = app.query_one(Prompt)
+            draft = "中文任务 👩‍💻\nHello مرحبا e\u0301"
+            app.post_message(Paste(draft))
+            await pilot.pause()
+            self.assertEqual(prompt.text, draft)
+            await pilot.press("ctrl+t")
+            self.assertEqual(app.theme, "harness-light")
+            self.assertEqual(prompt.text, draft)
+            self.assertIs(app.focused, prompt)
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            self.assertFalse(app.query_one("#sidebar").display)
+            self.assertTrue(prompt.is_on_screen)
+            self.assertTrue(app.query_one("#hint").is_on_screen)
+            await pilot.resize_terminal(40, 12)
+            await pilot.pause()
+            self.assertTrue(app.query_one("#minimum-size").is_on_screen)
+            self.assertFalse(app.query_one("#body").display)
+            await pilot.resize_terminal(120, 40)
+            await pilot.press("ctrl+t")
+            self.assertEqual(app.theme, "harness-dark")
+            self.assertTrue(app.query_one("#sidebar").display)
+            self.assertTrue(prompt.is_on_screen)
+            self.assertEqual(prompt.text, draft)
+            self.assertEqual(runtime.llm.calls, [])
 
     async def test_background_approval_uses_same_queue_and_explicit_owner(self):
         runtime = self.make_runtime(teams_enabled=False)

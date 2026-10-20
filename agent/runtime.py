@@ -390,7 +390,8 @@ class Runtime:
             teams_enabled=self.teams is not None,
             team_requires_plan=self.teams.require_plan if self.teams else False,
             team_worktrees_enabled=self.teams.worktrees.enabled if self.teams else False,
-            todo_summary=self.todos.summary(),
+            # Keep actionable plan text visible even after old tool results are archived.
+            todo_summary=self.todos.render() if self.todos.items else "",
         )
         if self.goal.active:
             prompt += (
