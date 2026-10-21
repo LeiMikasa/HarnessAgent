@@ -39,7 +39,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ### 先跑免费演示
 
 ```powershell
-.\.venv\Scripts\python.exe -m agent --mock --demo --workdir ".scratch\quickstart"
+.\.venv\Scripts\python.exe -m agent --mock --demo --permission-mode full --workdir ".scratch\quickstart"
 ```
 
 演示使用预设的 Mock 响应，在指定工作区创建并验证 `greeting.py`，不调用真实模型。Mock 用于验证运行流程，不具备真实模型的推理能力。
@@ -93,7 +93,8 @@ AGENT_APPROVAL=ask
 |---|---|
 | `--workdir PATH` | 指定目标项目目录 |
 | `--tui` | 使用 Textual 界面，流式显示模型回答 |
-| `--sandbox` | 将六个基础工具交给 Docker 执行 |
+| `--permission-mode read-only\|workspace\|full` | 只读、工作区内修改、完全权限；默认 `workspace` |
+| `--sandbox` | 保留的 Docker 开关；不能与完全权限模式同时使用 |
 | `--teams` | 开启后台队友和团队工具 |
 | `--memory` | 开启长期记忆 |
 | `--full` | 同时开启团队和长期记忆 |
@@ -107,7 +108,44 @@ AGENT_APPROVAL=ask
 | `--no-compaction` | 关闭上下文压缩 |
 | `--mock` | 使用离线 Mock 模型 |
 
-`--approval allow` 不会绕过硬拒绝列表，也不会扩大 Docker 文件工具允许访问的工作区。
+`--approval allow` 仅影响普通风险规则，不会自动批准受限模式下的宿主机执行申请，也不会绕过硬拒绝列表。`--approval deny` 直接拒绝提权。`--full` 是团队与记忆开关，不是完全权限；当前 Docker 模式不支持团队工作树。
+
+### 三种权限模式
+
+| 模式 | 默认行为 | 需要超出范围时 |
+|---|---|---|
+| `read-only` 只读 | 读取、搜索工具走 Docker，工作区以只读方式挂载；禁止普通命令和修改 | 申请本次完全权限，批准后该次基础工具在宿主机执行 |
+| `workspace` 工作区内修改 | 六个基础工具走 Docker，工作区可写 | 越界文件路径自动申请；宿主机命令须显式申请 |
+| `full` 完全权限 | 六个基础工具直接在宿主机执行，可访问当前系统用户有权操作的资源 | 不再为基础工具逐次确认；硬拒绝及自定义拒绝规则仍有效 |
+
+```powershell
+# 只读（需要 Docker 和本地镜像）
+.\.venv\Scripts\python.exe -m agent --tui --permission-mode read-only --workdir "D:\btest"
+
+# 工作区内修改，默认模式（需要 Docker 和本地镜像）
+.\.venv\Scripts\python.exe -m agent --tui --permission-mode workspace --workdir "D:\btest"
+
+# 完全权限：在宿主机执行
+.\.venv\Scripts\python.exe -m agent --tui --permission-mode full --workdir "D:\btest"
+```
+
+也可设置 `AGENT_PERMISSION_MODE`，命令行参数优先。只读限制针对项目操作；Agent 仍会在宿主机保存自己的会话、诊断等状态。联网与文件权限独立，Docker 使用 bridge 网络。
+
+例如工作区是 `D:\btest`，模型调用 `read_file` 读取 `D:\资料\接口说明.md` 时，会展示本次宿主机操作供用户批准。批准后直接在宿主机读取该文件，把内容返回模型；下一次普通调用仍进入原沙箱，不新增挂载，不修改会话模式。符号链接解析后越界也会走批准。
+
+命令中的路径不使用字符串猜测自动提权。若需要执行宿主机命令，模型应提交下面的工具参数（Windows 宿主机默认使用 cmd 语法）：
+
+```json
+{
+  "command": "type D:\\资料\\接口说明.md",
+  "execution_mode": "host",
+  "justification": "需要读取工作区外的接口说明"
+}
+```
+
+六个基础工具都支持 `execution_mode: "host"` 与 `justification`。该参数只是申请，不能自行授权。CLI 展示完整参数，TUI 显示“申请本次完全权限 · 宿主机执行”；拒绝、取消或无人可批准时不执行。临时权限在成功、失败、后续钩子拦截或异常时清除，也不会复制给子 Agent；单次宿主机执行不会自动重试。Docker 故障不自动回退宿主机。
+
+Python API 建议显式传入 `Runtime.create(..., permission_mode="workspace", teams_enabled=False)`。为兼容已有测试、嵌入调用和验证脚本，未传 `permission_mode` 的旧 API 仍按原 `sandbox_enabled` 配置工作；关闭沙箱时的路径检查不构成命令隔离。
 
 普通交互模式支持：
 
@@ -163,7 +201,7 @@ docker build -t harness-sandbox:dev sandbox
 | 项目 | 设置 |
 |---|---|
 | 镜像 | `harness-sandbox:dev` |
-| 工作区 | 指定目录以可写 bind mount 挂载到 `/workspace` |
+| 工作区 | 挂载到 `/workspace`；只读模式使用只读挂载，工作区修改模式使用可写挂载 |
 | 网络 | `bridge`，允许尝试联网安装依赖 |
 | 用户 | `node` |
 | 资源限制 | 2 GiB 内存、2 CPU、128 PID |
@@ -299,6 +337,7 @@ Skills 从工作区的 `skills/` 或 `AGENT_SKILL_DIRS` 指定目录发现，启
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p test_sandbox_file_tools.py -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_permission_modes.py -v
 ```
 
 真实容器验证使用前面的 `verify_file_tools_sandbox.py`，需要 Docker 和本地镜像，但不需要模型密钥。

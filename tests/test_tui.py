@@ -1,19 +1,21 @@
 """Headless keyboard, approval and layout tests with an offline model."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from textual.containers import VerticalScroll
 from textual.events import Paste
 from textual.widgets import Static
 
-from common import HarnessCase
+from common import HarnessCase, make_settings
 from agent.permissions import Rule
 from agent.tui import ApprovalScreen, HarnessApp, MessagePane, Prompt
 from agent.ui_events import UIEvent
 from agent.token_budget import estimate_request_breakdown, estimate_request_tokens
+from agent.tools.result import ToolResult
 
 
 class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
@@ -125,6 +127,49 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_approval_can_allow_exactly_once(self):
         await self.approval_case(True)
+
+    async def host_approval_case(self, allow):
+        workspace = self.tmp / "project"
+        workspace.mkdir()
+        outside = self.write("outside.txt", "外部资料")
+        runtime = self.make_runtime(
+            settings=make_settings(workspace), permission_mode="workspace", teams_enabled=False,
+            script=[{"tool": "read_file", "input": {"path": str(outside)}},
+                    {"tool": "read_file", "input": {"path": "inside.txt"}}, "done"],
+        )
+        # Even automatic ordinary approval must not skip a host confirmation.
+        self.assertEqual(runtime.permissions.approval, "allow")
+        box = Mock()
+        box.read_file.return_value = ToolResult("容器内资料")
+        runtime.get_sandbox = Mock(return_value=box)
+        app = HarnessApp(runtime, initial_request="读取资料")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+            self.assertIn("本次完全权限", str(app.screen.query_one("#approval-heading", Static).render()))
+            self.assertEqual(json.loads(app.current_approval.arguments)["path"], str(outside))
+            await self.until(pilot, lambda: app.focused is not None)
+            self.assertEqual(app.focused.id, "deny")
+            runtime.get_sandbox.assert_not_called()
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            for button_id in ("deny", "allow"):
+                button = app.screen.query_one(f"#{button_id}")
+                self.assertLessEqual(button.region.bottom, app.size.height)
+                self.assertTrue(button.visible)
+            await pilot.press("y" if allow else "escape")
+            await self.until(pilot, lambda: not app.busy)
+            results = self.tool_result_texts(runtime)
+            self.assertIn("外部资料" if allow else "PERMISSION_DENIED", results[0])
+            self.assertIn("容器内资料", results[1])
+            box.read_file.assert_called_once_with({"path": "inside.txt"})
+            self.assertNotIn("host_execution_approved", runtime.lead_ctx.extra)
+            self.assertIn("工作区内修改", str(app.query_one("#features", Static).render()))
+
+    async def test_host_approval_is_explicit_under_auto_allow_and_returns_to_container(self):
+        await self.host_approval_case(True)
+
+    async def test_host_approval_escape_denies_and_returns_to_container(self):
+        await self.host_approval_case(False)
 
     async def test_cancel_releases_permission_wait_and_prevents_tool_execution(self):
         runtime = self.make_runtime(script=[{"tool": "guarded", "input": {}}], teams_enabled=False)

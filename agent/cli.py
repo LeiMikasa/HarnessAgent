@@ -3,7 +3,7 @@
     python -m agent                     lightweight interactive session
     python -m agent --full              enable teams and long-term memory
     python -m agent "fix the failing test"
-    python -m agent --mock --demo       offline self-check, no API key needed
+    python -m agent --mock --demo --permission-mode full   offline host self-check
     python -m agent --status            print the resolved configuration
 
 Inside the REPL, lines starting with `:` are harness commands, everything else
@@ -16,6 +16,7 @@ is sent to the agent:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--status", action="store_true", help="Print configuration and exit.")
     parser.add_argument("--tui", action="store_true", help="Open the interactive terminal UI with streamed text.")
     parser.add_argument("--sandbox",action="store_true",help="Run shell commands in a Docker sandbox")
+    parser.add_argument(
+        "--permission-mode", choices=["read-only", "workspace", "full"],
+        help="read-only/workspace use Docker; full runs on the host. Default: workspace.",
+    )
     parser.add_argument(
         "--approval",
         choices=["ask", "allow", "deny"],
@@ -294,12 +299,24 @@ def main(argv: list[str] | None = None) -> int:
     script = _demo_script() if args.demo else None
 
     settings = load_settings(args.env_file, **{k: v for k, v in overrides.items() if k != "approval"})
+    permission_mode = args.permission_mode or os.getenv("AGENT_PERMISSION_MODE", "workspace")
+    if permission_mode not in ("read-only", "workspace", "full"):
+        _print(f"Unknown permission mode: {permission_mode}")
+        return 2
+    if args.sandbox and permission_mode == "full":
+        _print("--permission-mode full 在宿主机执行，不能同时使用 --sandbox")
+        return 2
 
     if args.status:
         _print(settings.describe())
+        _print(f"permission mode: {permission_mode}; tools: {'host' if permission_mode == 'full' else 'Docker'}")
         _print(f"features: teams={'on' if teams_enabled else 'off'}, "
                f"memory={'on' if memory_enabled else 'off'}, trace={'off' if args.no_trace else 'on'}")
         return 0
+
+    if permission_mode != "full" and teams_enabled:
+        _print("当前 Docker 沙箱尚不支持团队工作树，请使用 --no-teams")
+        return 2
 
     if not settings.is_mock and not settings.api_key:
         _print(
@@ -324,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
         on_event=None if args.tui else event_sink,
         on_progress=None if args.tui else progress_sink,
         sandbox_enabled=args.sandbox,
+        permission_mode=permission_mode,
 
     )
 

@@ -43,6 +43,7 @@ from .tools.result import ToolResult
 from .tools.recovery import ToolRecovery
 from .ui_events import UIEvent
 from .token_budget import ESTIMATOR_ID, estimate_request_breakdown, estimate_request_tokens
+from .permissions import CALL_PERMISSION_KEYS, HOST_EXECUTION_KEY
 
 MAX_REACTIVE_RETRIES = 1
 MAX_INCOMPLETE_RETRIES = 2
@@ -95,7 +96,11 @@ def execute_tool(
                                 elapsed=time.monotonic() - call_started)
         return output
 
-    ctx.extra.pop("allow_outside", None) # 清除旧的临时权限
+    def clear_call_permissions():
+        for permission_key in CALL_PERMISSION_KEYS:
+            ctx.extra.pop(permission_key, None)
+
+    clear_call_permissions()
     # 实际上检查了两类情况 同一个工具，目标的修正次数已经耗尽或者这个文件上一次修改结果不确定，需要先检查状态
     exhausted = recovery.exhausted(key) # 检查当前调用是否已经被恢复规则拦住
     invalid = exhausted if exhausted is not None else registry.validate(name, args)
@@ -104,22 +109,25 @@ def execute_tool(
         return finish(recovery.observe(key, invalid))
     for attempt in range(1, recovery.max_retries + 2):
         # Re-check permission for EVERY attempt; never reuse an escape approval.
-        ctx.extra.pop("allow_outside", None)
-        blocked = hooks.trigger(PRE_TOOL_USE, block, ctx)
-        if blocked is not None:
-            output = blocked if isinstance(blocked, ToolResult) else ToolResult.failure(
-                "POLICY_BLOCKED", str(blocked))
-            recovery.record(name, args, output, phase="permission", attempt=0)
-            return finish(output)
-        started = time.monotonic()
+        clear_call_permissions()
         try:
+            blocked = hooks.trigger(PRE_TOOL_USE, block, ctx)
+            if blocked is not None:
+                output = blocked if isinstance(blocked, ToolResult) else ToolResult.failure(
+                    "POLICY_BLOCKED", str(blocked))
+                recovery.record(name, args, output, phase="permission", attempt=0)
+                return finish(output)
+            on_host = bool(ctx.extra.get(HOST_EXECUTION_KEY))
+            execution_mode = "host" if on_host or not getattr(ctx.runtime, "sandbox_enabled", False) else "sandbox"
+            started = time.monotonic()
             output = registry.dispatch(name, args, ctx)
         finally:
-            ctx.extra.pop("allow_outside", None)
+            clear_call_permissions()
         hooks.trigger(POST_TOOL_USE, block, output, ctx)
-        retry = recovery.can_retry(registry.get(name), output, attempt)
+        # One approval grants one execution, including when a read fails transiently.
+        retry = not on_host and recovery.can_retry(registry.get(name), output, attempt)
         recovery.record(name, args, output, phase="execution", attempt=attempt,
-                        elapsed=time.monotonic() - started, retry=retry)
+                        elapsed=time.monotonic() - started, retry=retry, execution_mode=execution_mode)
         if not retry: # 不再重试有三种原因，已经成功  失败，但不适合自动重试  失败，而且重试次数已经用完
             return finish(recovery.observe(key, output))
         recovery.wait(attempt)

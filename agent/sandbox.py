@@ -9,12 +9,13 @@ from textwrap import dedent
 from .shell import noninteractive_process_options
 
 class DockerSandbox:
-    def __init__(self,workspace:str):
+    def __init__(self,workspace:str, *, read_only: bool = False):
         self.workspace=Path(workspace).resolve()
         if not self.workspace.is_dir():
             raise ValueError(f"工作目录不存在: {self.workspace}")
         self.name=f"harness-{uuid.uuid4().hex[:12]}"
         self.started=False
+        self.read_only = read_only
 
     def _docker(self,args: list[str],timeout=60,input_text=None):
         """在宿主机调用 Docker 客户端"""
@@ -45,7 +46,7 @@ class DockerSandbox:
              "--security-opt", "no-new-privileges=true",
             "--user", "node",
             "--mount",
-            f"type=bind,source={self.workspace},target=/workspace",
+            f"type=bind,source={self.workspace},target=/workspace" + (",readonly" if self.read_only else ""),
             "--workdir", "/workspace",
             "harness-sandbox:dev",
             "sleep", "infinity",

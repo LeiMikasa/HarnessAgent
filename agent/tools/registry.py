@@ -50,13 +50,16 @@ class ToolContext: # 表示一次工具调用的上下文，会传给每个工�
     def child(self, **overrides: Any) -> "ToolContext":
         """A copy with fields replaced -- used to enter a worktree, or to hand a
         non-interactive context to a teammate thread."""
+        from ..permissions import CALL_PERMISSION_KEYS
+
+        child_extra = {key: value for key, value in self.extra.items() if key not in CALL_PERMISSION_KEYS}
         data: dict[str, Any] = {
             "settings": self.settings,
             "workdir": self.workdir,
             "owner": self.owner,
             "interactive": self.interactive,
             "runtime": self.runtime,
-            "extra": dict(self.extra),
+            "extra": child_extra,
         }
         data.update(overrides)
         return ToolContext(**data)

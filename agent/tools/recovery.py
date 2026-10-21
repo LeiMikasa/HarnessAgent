@@ -71,7 +71,8 @@ class ToolRecovery:
                     and attempt <= self.max_retries
                     and result.error_code not in {"PERMISSION_DENIED", "INVALID_ARGUMENT"})
     # 记录一次尝试，但不改变恢复状态
-    def record(self, name, args, result, *, phase, attempt, elapsed=0.0, retry=False):
+    def record(self, name, args, result, *, phase, attempt, elapsed=0.0, retry=False,
+               execution_mode=None):
         try:
             serialized = json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)
         except (TypeError, ValueError):
@@ -81,7 +82,8 @@ class ToolRecovery:
                             "phase": phase, "attempt": attempt, "ok": result.ok,
                             "error_code": result.error_code,
                             "execution_status": result.execution_status,
-                            "elapsed_seconds": round(elapsed, 6), "auto_retry": retry})
+                            "elapsed_seconds": round(elapsed, 6), "auto_retry": retry,
+                            "execution_mode": execution_mode})
 
     def wait(self, attempt: int):
         # Full jitter, with a small bounded delay for local tools.

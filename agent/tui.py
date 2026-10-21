@@ -24,6 +24,7 @@ from textual.widgets import Button, Collapsible, Footer, Markdown, Static, TextA
 
 from .runtime import Runtime
 from .ui_events import UIEvent
+from .permissions import MODE_LABELS, is_host_approval
 
 
 def plain(value) -> str:
@@ -57,7 +58,8 @@ class ApprovalScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-box"):
-            yield Static("需要你的确认", id="approval-heading")
+            heading = "申请本次完全权限 · 宿主机执行" if is_host_approval(self.request.reason) else "需要你的确认"
+            yield Static(heading, id="approval-heading")
             yield Static(f"调用者：{plain(self.request.owner)}\n工具：{plain(self.request.tool)}", markup=False)
             if self.request.workdir:
                 yield Static(f"目录：{plain(self.request.workdir)}", markup=False)
@@ -255,7 +257,7 @@ class HarnessApp(App[int]):
     def approve(self, tool: str, args: dict, reason: str) -> bool:
         if self.shutdown.is_set() or self.cancel.is_set():
             return False
-        if self.runtime.permissions.approval == "allow":
+        if self.runtime.permissions.approval == "allow" and not is_host_approval(reason):
             return True
         if self.runtime.permissions.approval == "deny":
             return False
@@ -508,6 +510,7 @@ class HarnessApp(App[int]):
         self.query_one("#session", Static).update(table)
         approval = {"ask": "询问", "allow": "允许", "deny": "拒绝"}.get(runtime.permissions.approval, runtime.permissions.approval)
         features = (f"工具环境  {'Docker' if runtime.sandbox_enabled else '本机'}\n"
+                    f"权限模式  {MODE_LABELS.get(runtime.permission_mode, '旧版接口')}\n"
                     f"权限策略  {approval}\n团队协作  {'开启' if runtime.teams else '关闭'}\n"
                     f"长期记忆  {'开启' if runtime.memory.enabled else '关闭'}")
         self.query_one("#features", Static).update(features)

@@ -48,7 +48,7 @@ from .llm import LLMClient, build_client
 from .loop import LoopResult, run_loop
 from .mcp import MCPManager, register_mcp_tools
 from .memory import MemoryStore
-from .permissions import ALLOW, ASK, DENY, PermissionManager
+from .permissions import ALLOW, ASK, DENY, FULL, READ_ONLY, WORKSPACE, PERMISSION_MODES, PermissionManager
 from .prompt import build_system_prompt
 from .skills import SkillLoader, register_skill_tools
 from .subagent import build_subagent_registry, register_subagent_tools, run_subagent_loop
@@ -92,7 +92,8 @@ class Runtime:
         goal_evaluator: GoalEvaluator | None = None,
         diagnostics_enabled: bool = True,
         on_ui_event: Callable[[UIEvent], None] | None = None,
-        sandbox_enabled: bool=False
+        sandbox_enabled: bool = False,
+        permission_mode: str | None = None,
     ):
         self.settings = settings
         self.llm = llm
@@ -103,7 +104,15 @@ class Runtime:
         self.cancel_event = None
         self.stats = RuntimeStats()
         self.notes: list[str] = []
-        self.sandbox_enabled=sandbox_enabled
+        if permission_mode is not None and permission_mode not in PERMISSION_MODES:
+            raise ValueError(f"Unknown permission mode: {permission_mode}")
+        if permission_mode == FULL and sandbox_enabled:
+            raise ValueError("完全权限在宿主机执行，不能同时启用 Docker 沙箱")
+        # None preserves the pre-mode Python API; CLI always supplies a mode.
+        self.permission_mode = permission_mode
+        self.sandbox_enabled = (permission_mode != FULL if permission_mode is not None else sandbox_enabled)
+        if self.sandbox_enabled and teams_enabled:
+            raise ValueError("当前 Docker 沙箱尚不支持团队工作树，请使用 --no-teams")
         self.sandbox: DockerSandbox | None=None
         settings.ensure_dirs()
         self.diagnostics = (RunTrace(settings.state_dir / "runs", provider=settings.provider,
@@ -164,6 +173,9 @@ class Runtime:
             workdir=settings.workdir,
             approval=approval,
             approver=approver,
+            sandbox_enabled=self.sandbox_enabled,
+            mode=permission_mode or WORKSPACE,
+            tool_lookup=self.tools.get,
         )
 
         # -- hooks ----------------------------------------------------------
@@ -393,6 +405,16 @@ class Runtime:
             # Keep actionable plan text visible even after old tool results are archived.
             todo_summary=self.todos.render() if self.todos.items else "",
         )
+        if self.permission_mode:
+            prompt += (
+                f"\n\nPermission mode: {self.permission_mode}. "
+                "In read-only mode only inspection and todo bookkeeping are permitted by default; "
+                "ordinary shell commands and mutations are blocked. In workspace mode basic tools "
+                "run inside Docker. In full mode basic tools run directly on the host. "
+                "For one exceptional host call in read-only/workspace mode, set execution_mode='host' "
+                "and provide justification; a human must approve that exact invocation. "
+                "Never repeat a denied request unchanged."
+            )
         if self.goal.active:
             prompt += (
                 "\n\nActive goal condition: " + self.goal.condition
@@ -691,6 +713,7 @@ class Runtime:
             f"mcp:        {', '.join(self.mcp.names()) or 'none'}",
             f"turns:      {self.stats.turns}, tool calls: {self.stats.tool_calls}",
             f"permissions:{self.permissions.summary()}",
+            f"permission mode: {self.permission_mode or 'legacy API (application checks only unless sandbox enabled)'}",
             f"goal:       {self.goal.summary()}",
             f"features:   teams={'on' if self.teams is not None else 'off'}, "
             f"memory={'on' if self.memory.enabled else 'off'}",
@@ -711,7 +734,7 @@ class Runtime:
         if Path(workdir).resolve()!=self.settings.workdir.resolve():
             raise ValueError("当前沙箱尚不支持切换工作目录")
         if self.sandbox is None:
-            sandbox=DockerSandbox(str(workdir))
+            sandbox=DockerSandbox(str(workdir), read_only=self.permission_mode == READ_ONLY)
             sandbox.start()
             self.sandbox=sandbox
         return self.sandbox

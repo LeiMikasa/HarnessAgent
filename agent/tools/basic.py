@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 from ..shell import decode_shell_output, noninteractive_process_options, shell_guidance, shell_name
+from ..permissions import FULL, HOST_EXECUTION_KEY
 from .registry import ToolContext, ToolRegistry
 from .result import ToolError, ToolResult, tool_error
 
@@ -31,6 +32,15 @@ GLOB_MAX_MATCHES = 200 # glob最多返回200个匹配
 GREP_MAX_MATCHES = 500 # grep最多返回500行匹配，另受总输出字符预算限制
 GREP_MAX_FILE_BYTES = 2_000_000 # 跳过超2MB的文件
 GREP_LINE_LIMIT = 1000 # 每条命中内容最多1000字符，围绕匹配位置显示
+
+
+def _use_sandbox(args: dict, ctx: ToolContext) -> bool:
+    """Only the permission hook, never a model-supplied flag, grants host access."""
+    approved = bool(ctx.extra.get(HOST_EXECUTION_KEY))
+    full_mode = getattr(ctx.runtime, "permission_mode", None) == FULL
+    if args.get("execution_mode") == "host" and not (approved or full_mode):
+        raise ToolError("PERMISSION_DENIED", "Host execution requires approval for this invocation")
+    return bool(getattr(ctx.runtime, "sandbox_enabled", False) and not approved and not full_mode)
 
 
 class WorkspaceEscapeError(ToolError, ValueError):
@@ -104,10 +114,7 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
     #     return ToolResult.from_exception(exc)
     try:
         runtime=ctx.runtime
-        if (
-            runtime is not None
-            and getattr(runtime, "sandbox_enabled",False)
-        ):
+        if _use_sandbox(args, ctx):
             # 沙箱模式：在容器里执行
             sandbox=runtime.get_sandbox(ctx.workdir)
             result=sandbox.execute(command,timeout=timeout)
@@ -155,10 +162,7 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
 def run_read_file(args: dict, ctx: ToolContext) -> str:
 
     runtime=ctx.runtime
-    if (
-        runtime is not None
-        and getattr(runtime,"sandbox_enabled",False)
-    ):
+    if _use_sandbox(args, ctx):
         sandbox=runtime.get_sandbox(ctx.workdir)
         return sandbox.read_file(args)
     path = safe_path(ctx, args.get("path", ""))
@@ -207,10 +211,7 @@ def run_read_file(args: dict, ctx: ToolContext) -> str:
 
 def run_write_file(args: dict, ctx: ToolContext) -> str:
     runtime=ctx.runtime
-    if (
-        runtime is not None
-        and getattr(runtime,"sandbox_enabled",False)
-    ):
+    if _use_sandbox(args, ctx):
         sandbox=runtime.get_sandbox(ctx.workdir)
         return sandbox.write_file(args)
 
@@ -233,7 +234,7 @@ def run_write_file(args: dict, ctx: ToolContext) -> str:
 
 def run_edit_file(args: dict, ctx: ToolContext) -> str:
     runtime = ctx.runtime
-    if runtime is not None and getattr(runtime, "sandbox_enabled", False):
+    if _use_sandbox(args, ctx):
         return runtime.get_sandbox(ctx.workdir).edit_file(args)
 
     path = safe_path(ctx, args.get("path", ""))
@@ -280,7 +281,7 @@ def run_edit_file(args: dict, ctx: ToolContext) -> str:
 
 def run_glob(args: dict, ctx: ToolContext) -> str:
     runtime = ctx.runtime
-    if runtime is not None and getattr(runtime, "sandbox_enabled", False):
+    if _use_sandbox(args, ctx):
         return runtime.get_sandbox(ctx.workdir).glob(args)
 
     pattern = args.get("pattern", "")
@@ -288,6 +289,15 @@ def run_glob(args: dict, ctx: ToolContext) -> str:
         return tool_error("INVALID_ARGUMENT", "pattern is required", field="pattern", action="correct_arguments")
 
     root = Path(ctx.workdir).resolve()
+    # Check traversal before glob starts walking host directories.
+    prefix = []
+    for part in Path(pattern).expanduser().parts:
+        if any(char in part for char in "*?["):
+            break
+        prefix.append(part)
+    safe_path(ctx, str(Path(*prefix)) if prefix else ".")
+    if ".." in Path(pattern).parts and not ctx.extra.get("allow_outside"):
+        raise WorkspaceEscapeError("parent traversal in glob requires approval")
     try:
         raw_matches = globlib.glob(pattern, root_dir=str(root), recursive=True)
     except (re.error, OSError, ValueError) as exc:
@@ -299,7 +309,7 @@ def run_glob(args: dict, ctx: ToolContext) -> str:
             resolved = (root / match).resolve()
         except (OSError, RuntimeError):
             continue
-        if resolved.is_relative_to(root):
+        if resolved.is_relative_to(root) or ctx.extra.get("allow_outside"):
             matches.add(match.replace("\\", "/"))
 
     ordered = sorted(matches)
@@ -340,7 +350,7 @@ def _grep_preview(line: str, match: re.Match[str]) -> str:
 
 def run_grep(args: dict, ctx: ToolContext) -> str:
     runtime = ctx.runtime
-    if runtime is not None and getattr(runtime, "sandbox_enabled", False):
+    if _use_sandbox(args, ctx):
         return runtime.get_sandbox(ctx.workdir).grep(args)
 
     pattern = args.get("pattern", "")
@@ -466,6 +476,18 @@ _GREP_SCHEMA = {
 def register_basic_tools(registry: ToolRegistry,*,sandbox_enabled: bool=False) -> ToolRegistry:
     """Add the six base tools to `registry`."""
     for schema in (_BASH_SCHEMA, _READ_SCHEMA, _WRITE_SCHEMA, _EDIT_SCHEMA, _GLOB_SCHEMA, _GREP_SCHEMA):
+        schema["properties"].update({
+            "execution_mode": {
+                "type": "string", "enum": ["default", "host"],
+                "description": "default uses session policy; host requests this invocation on the host, requiring approval in restricted modes.",
+            },
+            "justification": {"type": "string", "minLength": 1,
+                              "description": "Explain why this invocation requires host access."},
+        })
+        schema["allOf"] = [{
+            "if": {"properties": {"execution_mode": {"const": "host"}}, "required": ["execution_mode"]},
+            "then": {"required": ["justification"]},
+        }]
         schema["additionalProperties"] = False
     registry.add(
         "bash",
