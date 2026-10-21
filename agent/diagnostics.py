@@ -240,6 +240,8 @@ class ObservedLLM:
         context = self.trace.context()
         call_id = uuid.uuid4().hex
         self.trace.record("model_start", **context, call_id=call_id, kind=kind,
+                          provider=getattr(self.client, "provider", "unknown"),
+                          model=getattr(self.client, "model", "unknown"),
                           message_count=len(kwargs.get("messages", [])))
         started = time.monotonic()
         try:

@@ -177,6 +177,19 @@ def extract_text(content: Any) -> str:
     return "\n".join(parts)
 
 
+def extract_thinking(content: Any) -> str:
+    """Only provider-returned thinking text; never signatures or redacted blocks."""
+    if not isinstance(content, (list, tuple)):
+        return ""
+    parts = []
+    for block in content:
+        if block_type(block) == "thinking":
+            value = block.get("thinking") if isinstance(block, dict) else getattr(block, "thinking", None)
+            if isinstance(value, str) and value:
+                parts.append(value)
+    return "\n\n".join(parts)
+
+
 def make_text_block(text: str) -> dict:
     return {"type": "text", "text": text}
 
@@ -209,6 +222,7 @@ class LLMClient(Protocol):
         tools: list[dict],
         max_tokens: int = 8000,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> LLMResponse:  # pragma: no cover - protocol
         ...
@@ -227,10 +241,30 @@ class LLMError(RuntimeError):
 # --------------------------------------------------------------------------
 
 
+class SwitchableLLM:
+    """Stable reference shared by loops and summarizers; swap only at call boundaries."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def __setattr__(self, name, value):
+        if name == "client":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self.client, name, value)
+
+    def create(self, **kwargs):
+        return self.client.create(**kwargs)
+
+
 class AnthropicLLM:
     """Anthropic (or Anthropic-compatible) chat client with light retry."""
 
     supports_text_stream = True
+    supports_thinking_stream = True
 
     def __init__(
         self,
@@ -273,6 +307,7 @@ class AnthropicLLM:
         tools: list[dict],
         max_tokens: int = 8000,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> LLMResponse:
         payload: dict[str, Any] = {
@@ -285,7 +320,7 @@ class AnthropicLLM:
             payload["tools"] = tools
 
         try:
-            if on_text is None:
+            if on_text is None and on_thinking is None:
                 raw = self._client.messages.create(**payload)
             else:
                 complete = False
@@ -295,8 +330,11 @@ class AnthropicLLM:
                             raise LLMError("Generation cancelled")
                         if event.type == "message_stop":
                             complete = True
-                        elif event.type == "content_block_delta" and event.delta.type == "text_delta":
-                            on_text(event.delta.text)
+                        elif event.type == "content_block_delta":
+                            if event.delta.type == "text_delta" and on_text:
+                                on_text(event.delta.text)
+                            elif event.delta.type == "thinking_delta" and on_thinking:
+                                on_thinking(event.delta.thinking)
                     if not complete:
                         raise LLMError("Stream ended before message_stop; response was not accepted", retryable=True)
                     raw = stream.get_final_message()
@@ -374,6 +412,9 @@ def _turn_to_blocks(step: Any, counter: list[int]) -> list[dict]:
         return blocks
 
     if isinstance(step, dict):
+        if step.get("type") in {"thinking", "redacted_thinking"}:
+            blocks.append(normalize_block(step))
+            return blocks
         # {"text": "...", "tool": "bash", "input": {...}} or
         # {"tool_calls": [{"tool": ..., "input": {...}}, ...]}
         if "tool_calls" in step:
@@ -393,6 +434,9 @@ def _turn_to_blocks(step: Any, counter: list[int]) -> list[dict]:
             if isinstance(call, str):
                 add_text(call)
             elif isinstance(call, dict):
+                if call.get("type") in {"thinking", "redacted_thinking"}:
+                    blocks.append(normalize_block(call))
+                    continue
                 if "text" in call and "tool" not in call and "name" not in call:
                     add_text(call["text"])
                 else:
@@ -421,6 +465,7 @@ class MockLLM:
     """
 
     supports_text_stream = True
+    supports_thinking_stream = True
 
     def __init__(
         self,
@@ -466,6 +511,7 @@ class MockLLM:
         tools: list[dict],
         max_tokens: int = 8000,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> LLMResponse:
         index = len(self.calls)
@@ -489,6 +535,12 @@ class MockLLM:
                 "response": copy.deepcopy(blocks),
             }
         )
+        if on_thinking:
+            thinking = extract_thinking(blocks)
+            for offset in range(0, len(thinking), 32):
+                if should_cancel and should_cancel():
+                    raise LLMError("Generation cancelled")
+                on_thinking(thinking[offset:offset + 32])
         if on_text:
             text = extract_text(blocks)
             for offset in range(0, len(text), 32):
@@ -511,7 +563,7 @@ def build_client(
 ) -> LLMClient:
     """Pick a client from the resolved settings."""
     if settings.provider == "mock":
-        return MockLLM(script, responder)
+        return MockLLM(script, responder, model=settings.model)
     return AnthropicLLM(
         model=settings.model,
         api_key=settings.api_key,

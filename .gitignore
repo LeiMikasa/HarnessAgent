@@ -37,3 +37,8 @@ venv/
 .vscode/
 *.swp
 .DS_Store
+
+# Web client build and dependencies
+node_modules/
+/web/dist/
+*.tsbuildinfo

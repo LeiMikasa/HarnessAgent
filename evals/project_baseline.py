@@ -1,4 +1,4 @@
-"""Deterministic checks of HarnessAgent's own team lifecycle.
+"""Deterministic checks of minicode's own team lifecycle.
 
 These checks use the production CLI and teammate loop, but no paid model calls.
 An invariant failure is recorded as data rather than making the evaluator crash.

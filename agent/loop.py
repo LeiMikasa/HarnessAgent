@@ -36,7 +36,7 @@ from typing import Callable
 from .context import COMPACT_FLAG, ContextBudgetError, ContextCompactor, is_prompt_too_long
 from .diagnostics import RunTrace, traced_loop
 from .events import POST_TOOL_USE, PRE_TOOL_USE, STOP, Hooks, StopDirective
-from .llm import LLMClient, extract_text, make_tool_result, tool_use_blocks
+from .llm import LLMClient, extract_text, extract_thinking, make_tool_result, tool_use_blocks
 from .tools.registry import ToolContext, ToolRegistry
 from .tools.feedback import CommandFeedback
 from .tools.result import ToolResult
@@ -76,6 +76,9 @@ def execute_tool(
     """
     # An approved path-escape is good for exactly one call.  Clearing it here
     # means an approval can never leak into the next tool call.
+    apply_controls = ctx.extra.get("apply_controls")
+    if apply_controls:
+        apply_controls()
     recovery = recovery if recovery is not None else ToolRecovery() #准备恢复管理器，取出工具名和参数
     attempts_start = len(recovery.events)
     name, args = block.get("name", ""), block.get("input", {})
@@ -203,6 +206,9 @@ def run_loop(
         progress(f"[model] round {turn}: preparing context")
 
         # -- layer 0: anything the harness owes the model right now ---------
+        apply_controls = ctx.extra.get("apply_controls")
+        if apply_controls:
+            apply_controls()
         if before_call is not None:
             before_call(messages)  # 每轮先补充新消息
 
@@ -256,6 +262,8 @@ def run_loop(
             if ctx.extra.get("ui_events") and getattr(llm, "supports_text_stream", False):
                 stream_args = {"on_text": lambda text: ui("text_delta", model_call_id, text),
                                "should_cancel": cancelled}
+                if getattr(llm, "supports_thinking_stream", False):
+                    stream_args["on_thinking"] = lambda text: ui("thinking_delta", model_call_id, text)
             response = llm.create(
                 system=system_prompt,
                 messages=messages,
@@ -285,6 +293,7 @@ def run_loop(
             return result
 
         ui("model_end", model_call_id, extract_text(response.content), stop_reason=response.stop_reason,
+           thinking=extract_thinking(response.content),
            tool_calls=len(tool_use_blocks(response.content)))
         if cancelled():
             return cancel_result()

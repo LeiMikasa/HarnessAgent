@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import sys
 import unittest
 import uuid
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -54,12 +56,36 @@ def make_settings(workdir: Path, **overrides) -> Settings:
     return Settings(**base)
 
 
+def _remove_tmpdir(path: Path) -> None:
+    """Remove only an allocated scratch case, including Windows Git objects."""
+    path = Path(path)
+    if path.is_symlink() or path.resolve().parent != SCRATCH_ROOT.resolve():
+        raise ValueError(f"Refusing to remove a non-test directory: {path}")
+    if not path.exists():
+        return
+
+    def retry_readonly(function, filename, exc_info):
+        if not isinstance(exc_info[1], PermissionError):
+            raise exc_info[1]
+        os.chmod(filename, os.stat(filename).st_mode | stat.S_IWUSR)
+        function(filename)
+
+    shutil.rmtree(path, onerror=retry_readonly)
+
+
 class HarnessCase(unittest.TestCase):
     """A test case with a throwaway workspace and a mock-model runtime."""
 
     def setUp(self) -> None:
         self.tmp = _make_tmpdir()
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(_remove_tmpdir, self.tmp)
+        # Scratch directories sit inside the checkout. Never discover its Git
+        # repository by walking upward; explicit git-init fixtures still work.
+        ceilings = os.pathsep.join(filter(None, [str(SCRATCH_ROOT.resolve()),
+                                               os.environ.get("GIT_CEILING_DIRECTORIES")]))
+        env_patch = patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": ceilings})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def make_runtime(self, script=None, settings=None, memory: bool = False, **kwargs) -> Runtime:
         """Build a runtime for a test.

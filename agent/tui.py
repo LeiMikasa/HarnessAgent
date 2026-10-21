@@ -125,7 +125,7 @@ class MessagePane(Vertical):
 
 
 class HarnessApp(App[int]):
-    TITLE = "HarnessAgent"
+    TITLE = "minicode"
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [Binding("ctrl+c", "stop", "停止", priority=True),
                 Binding("ctrl+q", "request_quit", "退出", priority=True),
@@ -180,7 +180,7 @@ class HarnessApp(App[int]):
         yield Static("窗口过小\n请调整到至少 60 列 × 18 行\nCtrl+Q 退出", id="minimum-size", markup=False)
         with Vertical(id="top"):
             with Horizontal(id="header-line"):
-                yield Static("HARNESS  /  coding agent", id="brand", markup=False)
+                yield Static("minicode  /  coding agent", id="brand", markup=False)
                 yield Static(Text(plain(self.runtime.settings.model), no_wrap=True, overflow="ellipsis"), id="model")
                 yield Static("● 就绪", id="activity", markup=False)
             yield Static(Text("工作区  " + plain(self.runtime.settings.workdir), no_wrap=True, overflow="ellipsis"), id="workspace")

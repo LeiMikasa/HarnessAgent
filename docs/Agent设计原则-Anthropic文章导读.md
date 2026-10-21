@@ -2,7 +2,7 @@
 
 来源：[Building effective agents — Anthropic](https://www.anthropic.com/engineering/building-effective-agents)。原文发表于 2024 年 12 月 19 日；当前页面提示部分工具信息已有变化。
 
-本文先简要转述原文，再用 HarnessAgent 的代码举例。项目建议和例子属于结合当前工程的解读，不是原文结论。
+本文先简要转述原文，再用 minicode 的代码举例。项目建议和例子属于结合当前工程的解读，不是原文结论。
 
 ## 1. 原文的核心原则
 
@@ -25,7 +25,7 @@
 
 ## 2. 放到你的项目里，分别是什么意思
 
-下面是针对 HarnessAgent 的工程解读。
+下面是针对 minicode 的工程解读。
 
 ### 统一循环负责推进，模块负责提供能力
 

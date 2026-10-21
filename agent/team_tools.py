@@ -209,7 +209,9 @@ def run_remove_worktree(args: dict, ctx: ToolContext) -> str:
     name = str(args.get("name", "")).strip()
     if not name:
         return ToolResult.failure('INVALID_ARGUMENT', "Error: name is required", action='correct_arguments', execution_status='not_executed')
-    return manager.worktrees.remove(name, discard_changes=bool(args.get("discard_changes")))
+    return manager.worktrees.remove(
+        name, discard_changes=bool(args.get("discard_changes")),
+        delete_branch=bool(args.get("delete_branch")))
 
 
 def run_list_worktrees(args: dict, ctx: ToolContext) -> str:
@@ -305,6 +307,12 @@ REMOVE_WORKTREE_SCHEMA = {
     "type": "object",
     "properties": {
         "name": {"type": "string"},
+        "delete_branch": {
+            "type": "boolean",
+            "description": "Also delete wt/<name> after integration and verification. Requires a clean "
+                           "worktree, completed tasks, no lease, and branch ancestry in the lead HEAD. "
+                           "Default false. Cannot combine with discard_changes.",
+        },
         "discard_changes": {
             "type": "boolean",
             "description": "Remove even if the worktree has uncommitted or ignored files.",
@@ -363,7 +371,8 @@ def register_lead_team_tools(registry: ToolRegistry) -> ToolRegistry:
     )
     registry.add(
         "remove_worktree",
-        "Remove a worktree. Refuses while it is leased to unfinished work.",
+        "Remove a managed worktree after releasing leases and completing its tasks. "
+        "Optionally delete its integrated branch with delete_branch=true after project checks pass.",
         REMOVE_WORKTREE_SCHEMA,
         run_remove_worktree,
     )

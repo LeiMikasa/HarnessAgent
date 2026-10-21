@@ -1,4 +1,6 @@
-# HarnessAgent
+# minicode
+
+原项目名为 HarnessAgent，现统一使用 `minicode`。CLI 使用 `python -m minicode`，Web 使用 `python -m minicode.web`；原来的 `python -m agent` 和 `python -m agent.web` 仍可使用。代码中的核心实现仍位于 `agent/`。本文示例中的 `D:\HarnessAgent` 是当前本机项目目录，项目名称不要求与目录名一致。
 
 用 Python 实现的模块化编码 Agent：模型负责决定下一步，运行时负责工具执行、权限检查、上下文管理、任务协作和运行记录。
 
@@ -39,7 +41,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ### 先跑免费演示
 
 ```powershell
-.\.venv\Scripts\python.exe -m agent --mock --demo --permission-mode full --workdir ".scratch\quickstart"
+.\.venv\Scripts\python.exe -m minicode --mock --demo --permission-mode full --workdir ".scratch\quickstart"
 ```
 
 演示使用预设的 Mock 响应，在指定工作区创建并验证 `greeting.py`，不调用真实模型。Mock 用于验证运行流程，不具备真实模型的推理能力。
@@ -59,7 +61,7 @@ AGENT_APPROVAL=ask
 这里的模型名称与项目内置预设一致；实际可用名称取决于供应商及账号。查看解析后的配置不会调用模型：
 
 ```powershell
-.\.venv\Scripts\python.exe -m agent --status
+.\.venv\Scripts\python.exe -m minicode --status
 ```
 
 需要检查真实接口和工具调用往返时运行：
@@ -74,20 +76,83 @@ AGENT_APPROVAL=ask
 
 ### 指定开发目录启动
 
-工作区是 Agent 要修改的项目目录，不必是 HarnessAgent 自身目录。
+工作区是 Agent 要修改的项目目录，不必是 minicode 自身目录。
 
 ```powershell
 # 普通交互模式
-.\.venv\Scripts\python.exe -m agent --workdir "D:\btest"
+.\.venv\Scripts\python.exe -m minicode --workdir "D:\btest"
 
 # 终端界面
-.\.venv\Scripts\python.exe -m agent --tui --workdir "D:\btest"
+.\.venv\Scripts\python.exe -m minicode --tui --workdir "D:\btest"
 
 # 执行一个任务后退出
-.\.venv\Scripts\python.exe -m agent --workdir "D:\btest" "检查项目并修复失败的测试"
+.\.venv\Scripts\python.exe -m minicode --workdir "D:\btest" "检查项目并修复失败的测试"
 ```
 
 ## 启动选项与交互命令
+
+### 浏览器工作台
+
+Web 使用 **Vue 3 + TypeScript + Vite** 前端和 **FastAPI** 后端。复用现有 Runtime、Agent Loop、工具、权限与 Docker；不需要把 Agent 本体搬进浏览器。
+
+首次使用，在项目根目录执行：
+
+```powershell
+cd D:\HarnessAgent
+.\.venv\Scripts\python.exe -m pip install -r requirements-web.txt
+cd web
+npm.cmd install
+npm.cmd run build
+cd ..
+.\.venv\Scripts\python.exe -m minicode.web --workdir "D:\btest"
+```
+
+打开 **http://127.0.0.1:8765**。后续启动只需要最后一条 Python 命令。PowerShell 使用 `npm.cmd` 可避免 `npm.ps1` 被本机执行策略阻止。
+
+新建会话时先选择已有工作目录、使用模型和权限模式：
+
+工作目录右侧的“选择文件夹”会打开本机系统选择窗口，选好后自动回填完整路径；取消选择会保留原来的路径，也可以手动输入。选择窗口需要本机桌面环境和 Python Tkinter，最长等待 3 分钟。这个动作只选择目录路径，不上传目录内容或启动 Agent。
+
+- **只读**：读取与搜索走 Docker，工作区只读挂载。
+- **工作区内修改**：基础工具默认在 Docker 工作区执行。
+- **完全权限**：基础工具直接在宿主机执行。
+
+会话创建后，右上角可以随时调整权限或切换模型，无需新建会话。运行中提交的设置会显示“等待生效”：当前调用先完成，在下一次模型/工具调用前应用；同一批工具的后续调用也会重新检查权限。切到完全权限须勾选确认；切换权限会拒绝未完成的旧审批，并关闭旧容器，容器里的后台进程会结束，后续按新挂载方式创建容器。正在执行的宿主机操作不会被追溯撤销。
+
+模型可切到免费 Mock，或填写当前已配置服务支持的模型 ID，沿用该服务的地址与密钥；不支持在页面内新增其他服务的密钥。切换保留对话与统计，下次请求才验证模型 ID 是否可用；设置动作本身不调用模型、不消耗 token。
+
+前两种模式需要运行 Docker Desktop 并构建 `minicode-sandbox:dev` 镜像。工作区外文件或显式宿主机申请会在网页里显示审批弹窗，默认聚焦拒绝；批准仅作用于当次调用。浏览器通过 SSE 接收流式回答、工具状态与上下文统计，任务、停止与审批通过 HTTP 提交。
+
+模型密钥从 Python 后端的 `.env` 读取，不发送到前端配置接口。会话列表、对话和工具记录保存在后端状态目录的 `web/<会话 ID>/` 下，刷新页面或重启服务后可继续会话。长期记忆与团队默认关闭；第一版不提供团队工作树和多人远程访问。服务只监听 `127.0.0.1`，并检查 Host 和网页来源。
+
+模型服务返回可读的思考内容时，页面会显示可折叠的“思考过程”，展开后可实时查看，正文和工具记录分别展示。生成完成后保留在会话中；断流或取消会标记中断。未返回思考内容时不显示该区域，也不会为展示额外发起模型请求；旧会话之前未保存到页面记录中的思考不会自动补录。
+
+**免费试用**：新建会话时选 `Mock · 免费流程演示`。如果只验证界面、且本机 Docker 未运行，可选完全权限；演示仅调用任务清单与顶层文件搜索等预设步骤，不调用真实模型，也不声称完成输入的开发任务。Mock 的 token 实际用量显示“未知”，上下文估计正常展示。
+
+“停止”沿用现有协作式取消：立即拒绝等待中的审批，后续循环不再执行新调用；正在执行的模型请求或工具可能仍需要等待结束。关闭页面不会自动停止后端任务，重新打开该会话可查看状态或请求停止。未处理的审批最多等待 5 分钟，超时拒绝。
+
+开发前端时保留 Python 服务，再开一个终端：
+
+```powershell
+cd D:\HarnessAgent\web
+npm.cmd run dev
+```
+
+访问 `http://127.0.0.1:5173`，Vite 将 `/api` 转发到本机 `8765`。页面修改后需要重新执行 `npm.cmd run build` 才会更新 Python 服务提供的生产页面。
+
+免费检查：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_web.py -v
+cd web
+npm.cmd test
+npm.cmd run build
+npm.cmd run test:e2e
+```
+
+浏览器测试会启动独立的本机 `8767` 测试服务，使用 `.scratch` 临时项目和免费 Mock。Windows 默认使用已安装的 Edge；其他平台可安装 Playwright Chromium，或通过 `PLAYWRIGHT_CHANNEL` 指定浏览器。
+
+### 终端启动参数
 
 | 参数 | 作用 |
 |---|---|
@@ -120,13 +185,13 @@ AGENT_APPROVAL=ask
 
 ```powershell
 # 只读（需要 Docker 和本地镜像）
-.\.venv\Scripts\python.exe -m agent --tui --permission-mode read-only --workdir "D:\btest"
+.\.venv\Scripts\python.exe -m minicode --tui --permission-mode read-only --workdir "D:\btest"
 
 # 工作区内修改，默认模式（需要 Docker 和本地镜像）
-.\.venv\Scripts\python.exe -m agent --tui --permission-mode workspace --workdir "D:\btest"
+.\.venv\Scripts\python.exe -m minicode --tui --permission-mode workspace --workdir "D:\btest"
 
 # 完全权限：在宿主机执行
-.\.venv\Scripts\python.exe -m agent --tui --permission-mode full --workdir "D:\btest"
+.\.venv\Scripts\python.exe -m minicode --tui --permission-mode full --workdir "D:\btest"
 ```
 
 也可设置 `AGENT_PERMISSION_MODE`，命令行参数优先。只读限制针对项目操作；Agent 仍会在宿主机保存自己的会话、诊断等状态。联网与文件权限独立，Docker 使用 bridge 网络。
@@ -173,13 +238,13 @@ TUI 中 Enter 发送、Ctrl+J 换行、Ctrl+P/N 浏览输入历史、Ctrl+T 切�
 先安装并启动 Docker Desktop，使用 Linux 容器模式。在项目根目录构建镜像：
 
 ```powershell
-docker build -t harness-sandbox:dev sandbox
+docker build -t minicode-sandbox:dev sandbox
 ```
 
 镜像包含 Node.js、npm、Python 3、Git、Bash 和 ripgrep。开启沙箱：
 
 ```powershell
-.\.venv\Scripts\python.exe -m agent --tui --sandbox --workdir "D:\btest"
+.\.venv\Scripts\python.exe -m minicode --tui --sandbox --workdir "D:\btest"
 ```
 
 确保目标工作区存在。当前沙箱绑定 Runtime 的固定工作目录，暂不支持队友切换到不同 worktree；使用沙箱时关闭团队，不与 `--teams` 或启用团队的 `--full` 组合。
@@ -187,7 +252,7 @@ docker build -t harness-sandbox:dev sandbox
 ### 执行位置
 
 ```text
-宿主机 HarnessAgent
+宿主机 minicode
   ├─ Agent Loop、模型 API、权限确认、界面、状态管理
   └─ Docker 容器
        ├─ bash / read_file / write_file / edit_file / glob / grep
@@ -200,7 +265,7 @@ docker build -t harness-sandbox:dev sandbox
 
 | 项目 | 设置 |
 |---|---|
-| 镜像 | `harness-sandbox:dev` |
+| 镜像 | `minicode-sandbox:dev` |
 | 工作区 | 挂载到 `/workspace`；只读模式使用只读挂载，工作区修改模式使用可写挂载 |
 | 网络 | `bridge`，允许尝试联网安装依赖 |
 | 用户 | `node` |
@@ -287,6 +352,8 @@ Skills 从工作区的 `skills/` 或 `AGENT_SKILL_DIRS` 指定目录发现，启
 一次性子 Agent 使用独立对话完成委派，工具池排除 `task`、`spawn_teammate`、`connect_mcp`，防止继续递归委派。线程队友则保留自己的状态和信箱，可认领共享任务，按计划门规则申请审核，并在任务绑定的 Git worktree 中工作。worktree 需要目标项目本身是 Git 仓库，成果通过 Git 流程合并，不会自动合并到主工作目录。
 
 团队任务认领使用进程内锁；任务文件原子写入。当前没有多进程共享同一状态目录所需的完整协调保障。
+
+团队收尾时，主 Agent 应先整合队友提交并完成项目验证，再调用 `remove_worktree({"name": "工作树名", "delete_branch": true})` 清理。后端要求工作树处于受管理路径、使用对应的 `wt/<name>` 分支、没有租约、绑定任务全部完成、没有未提交/未跟踪/被忽略的文件，且分支提交已包含在主 Agent 当前 HEAD 中。检查失败会保留；不传 `delete_branch` 时仍保留分支。删除分支使用 `git branch -d`，不会强删未合入的提交。通过 cherry-pick 或 squash 整合后，原分支可能因祖先关系无法证明而被保留。该流程由主 Agent 调用工具触发，不是后台定时清理；Git 整合检查也不代替功能测试。
 
 ## 配置、状态与诊断
 

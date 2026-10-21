@@ -55,7 +55,7 @@ from typing import Any, Callable
 
 from .events import Hooks
 from .llm import LLMClient, extract_text
-from .tasks import IN_PROGRESS, PENDING, Task, TaskError, TaskStore
+from .tasks import COMPLETED, IN_PROGRESS, PENDING, Task, TaskError, TaskStore
 from .todo import TodoList
 from .tools.registry import Tool, ToolContext, ToolRegistry
 
@@ -471,20 +471,43 @@ class WorktreeManager:
         self.bind(task_id, name)
         return f"Created worktree {name!r} at {path} (branch {branch})"
     # 移除worktree
-    def remove(self, name: str, *, discard_changes: bool = False) -> str:
-        """Host-only.  Refuses while the worktree is bound to unfinished work."""
+    def remove(self, name: str, *, discard_changes: bool = False,
+               delete_branch: bool = False) -> str:
+        """Host-only cleanup; branch deletion requires clean, integrated work."""
         try:
             name = validate_worktree_name(name)
         except TeamError as exc:
             return ToolResult.failure('PRECONDITION_FAILED', f"Error: {exc}", action='inspect', execution_status='not_executed')
 
+        # Keep lease acquisition out until removal and task unbinding finish.
         with self._lock:
-            bound = [a for a in self.assignments.values() if a.worktree == name]
-            if bound:
-                return (
-                    f"Error: worktree {name!r} is still assigned to "
-                    f"{', '.join(a.teammate for a in bound)}; release it first"
-                )
+            return self._remove(name, discard_changes=discard_changes,
+                                delete_branch=delete_branch)
+
+    def _remove(self, name: str, *, discard_changes: bool,
+                delete_branch: bool) -> str:
+        def refuse(message: str) -> ToolResult:
+            return ToolResult.failure('PRECONDITION_FAILED', f"Error: {message}",
+                                      action='inspect')
+
+        if delete_branch and discard_changes:
+            return refuse("delete_branch cannot be combined with discard_changes; preserve local files first")
+
+        path = self._path(name)
+        branch = self._branch(name)
+        # Match both the managed path and expected branch, never just a basename.
+        entry = self.registered().get(name)
+        if (not entry or Path(entry['worktree']).resolve() != path
+                or entry.get('branch') != f"refs/heads/{branch}"
+                or path == self.workspace or 'locked' in entry):
+            return refuse(f"{name!r} is not an unlocked managed worktree on {branch}")
+
+        bound = [a for a in self.assignments.values() if a.worktree == name]
+        if bound:
+            return refuse(
+                f"worktree {name!r} is still assigned to "
+                f"{', '.join(a.teammate for a in bound)}; release it first"
+            )
 
         # A worktree still bound to unfinished work must not be torn down,
         # even with discard_changes -- the task would lose its checkout.
@@ -492,26 +515,47 @@ class WorktreeManager:
             task.id for task in self.bound_tasks(name) if task.status != COMPLETED
         ]
         if unfinished:
-            return (
-                f"Error: worktree {name!r} is bound to unfinished "
+            return refuse(
+                f"worktree {name!r} is bound to unfinished "
                 f"{', '.join(unfinished)}; complete them first"
             )
 
         if not discard_changes:
-            ok, status = self._run_git(["status", "--porcelain", "--ignored"], cwd=self._path(name))
-            if ok and status.strip():
-                return (
-                    f"Error: worktree {name!r} has uncommitted or ignored files. "
-                    "Commit them or pass discard_changes=True."
+            ok, status = self._run_git(["status", "--porcelain", "--ignored", "--untracked-files=all"], cwd=path)
+            if not ok:
+                return refuse(f"cannot inspect worktree {name!r}: {status}")
+            if status.strip():
+                return refuse(
+                    f"worktree {name!r} has uncommitted, untracked, or ignored files. "
+                    "Preserve them before cleanup; discard_changes is only available when retaining the branch."
                 )
 
-        ok, output = self._run_git(["worktree", "remove", "--force", str(self._path(name))])
+        if delete_branch:
+            ok, output = self._run_git(["merge-base", "--is-ancestor", f"refs/heads/{branch}", "HEAD"])
+            if not ok:
+                return refuse(f"branch {branch} is not verified as integrated into the lead HEAD; "
+                              f"worktree and branch retained. {output}")
+
+        args = ["worktree", "remove"]
+        if discard_changes:
+            args.append("--force")
+        ok, output = self._run_git([*args, str(path)])
         if not ok:
             return ToolResult.failure('TOOL_ERROR', f"Error: git worktree remove failed: {output}", action='inspect_state', execution_status='unknown')
-        # The wt/<name> branch is deliberately retained, so work can be reviewed.
         for task in self.bound_tasks(name):
             self.bind(task.id, None)
-        return f"Removed worktree {name!r} (branch {self._branch(name)} retained)"
+        if delete_branch:
+            # Check again after removal: external Git operations do not share our lock.
+            ok, output = self._run_git(["merge-base", "--is-ancestor", f"refs/heads/{branch}", "HEAD"])
+            if ok:
+                ok, output = self._run_git(["branch", "-d", "--", branch])
+            if not ok:
+                return ToolResult.failure(
+                    'TOOL_ERROR', f"Removed worktree {name!r}, but branch {branch} retained: {output}. "
+                    "Inspect Git state before further cleanup.", action='inspect_state',
+                    execution_status='unknown')
+            return f"Removed worktree {name!r} and deleted integrated branch {branch}"
+        return f"Removed worktree {name!r} (branch {branch} retained)"
 
     # -- leases -------------------------------------------------------------
     # 运行时租约

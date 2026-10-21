@@ -1,8 +1,8 @@
-# Agent 面试题：结合 AgentGuide 与 HarnessAgent
+# Agent 面试题：结合 AgentGuide 与 minicode
 
 整理日期：2026-10-08。面向 Agent / 大模型应用开发岗位。
 
-选题参考 AgentGuide 的 [Agent 核心题库](https://github.com/adongwanai/AgentGuide/blob/main/docs/04-interview/03-agent-questions.md)，其中涉及 Agent 定义、ReAct、记忆、工具、协作、反馈和并发。下面的回答由 HarnessAgent 当前代码重新组织，并非原题库的标准答案，也不代表这些题必然出现在面试中。
+选题参考 AgentGuide 的 [Agent 核心题库](https://github.com/adongwanai/AgentGuide/blob/main/docs/04-interview/03-agent-questions.md)，其中涉及 Agent 定义、ReAct、记忆、工具、协作、反馈和并发。下面的回答由 minicode 当前代码重新组织，并非原题库的标准答案，也不代表这些题必然出现在面试中。
 
 AgentGuide 的 [Harness Engineering](https://github.com/adongwanai/AgentGuide/blob/main/docs/02-tech-stack/27-agent-harness-engineering.md) 区分了模型决策和运行环境职责；[Evaluation Harness](https://github.com/adongwanai/AgentGuide/blob/main/docs/02-tech-stack/26-agent-evaluation-harness-guide.md) 区分了任务集、指标和评测执行框架。对应到本项目，就是 `agent/` 负责执行任务，`evals/` 负责构造条件、运行对照、独立验收和输出报告。
 
@@ -14,7 +14,7 @@ AgentGuide 的 [Harness Engineering](https://github.com/adongwanai/AgentGuide/bl
 
 **参考回答：**
 
-> HarnessAgent 是用 Python 实现的编码 Agent 执行框架。模型负责选择下一步动作，框架负责执行工具、回传结果、保存状态和控制权限。主 Agent、一次性子 Agent、持续工作的线程队友复用同一个核心循环。
+> minicode 是用 Python 实现的编码 Agent 执行框架。模型负责选择下一步动作，框架负责执行工具、回传结果、保存状态和控制权限。主 Agent、一次性子 Agent、持续工作的线程队友复用同一个核心循环。
 >
 > 我重点关注长任务中的上下文管理和结果验证。上下文过长时，先把工具结果和历史归档到磁盘，必要时生成摘要，并保留原文地址供模型查找。同时搭建了压缩开关的成对评测，分别统计信息召回、用例通过和供应商返回的 token 用量。
 >

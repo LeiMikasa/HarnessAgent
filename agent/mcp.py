@@ -175,7 +175,7 @@ class StdioMCPClient(MCPClient):
             {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "harnessagent", "version": "0.1.0"},
+                "clientInfo": {"name": "minicode", "version": "0.1.0"},
             },
         )
         self._notify("notifications/initialized", {})
@@ -472,7 +472,7 @@ def build_docs_server() -> InProcessMCPClient:
         return "\n".join(hits) if hits else f"No documentation matches {query!r}"
 
     def get_version() -> str:
-        return f"harnessagent {__version__}"
+        return f"minicode {__version__}"
 
     def list_topics() -> str:
         return ", ".join(sorted(corpus))

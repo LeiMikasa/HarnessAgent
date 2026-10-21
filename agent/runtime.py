@@ -44,7 +44,7 @@ from .events import (
     StopDirective,
 )
 from .goal import GoalController, GoalEvaluator, PromptGoalEvaluator
-from .llm import LLMClient, build_client
+from .llm import LLMClient, SwitchableLLM, build_client
 from .loop import LoopResult, run_loop
 from .mcp import MCPManager, register_mcp_tools
 from .memory import MemoryStore
@@ -96,7 +96,7 @@ class Runtime:
         permission_mode: str | None = None,
     ):
         self.settings = settings
-        self.llm = llm
+        self.llm = llm = SwitchableLLM(llm)
         self.verbose = verbose
         self.on_event = on_event
         self.on_progress = on_progress
@@ -738,6 +738,36 @@ class Runtime:
             sandbox.start()
             self.sandbox=sandbox
         return self.sandbox
+
+    def change_permission_mode(self, mode: str) -> None:
+        """Execution-thread only: call between tools, never during a handler/approval."""
+        if mode not in PERMISSION_MODES:
+            raise ValueError("无效的权限模式")
+        if mode != FULL and self.teams is not None:
+            raise ValueError("当前 Docker 沙箱尚不支持团队工作树")
+        if mode == self.permission_mode:
+            return
+        # A previous RW mount must never survive a switch to read-only.
+        if self.sandbox is not None:
+            self.sandbox.close()
+            self.sandbox = None
+        self.permission_mode = self.permissions.mode = mode
+        self.sandbox_enabled = self.permissions.sandbox_enabled = mode != FULL
+        for key in ("allow_outside", "host_execution_approved"):
+            self.lead_ctx.extra.pop(key, None)
+        descriptions = ToolRegistry()
+        register_basic_tools(descriptions, sandbox_enabled=self.sandbox_enabled)
+        self.tools.get("bash").description = descriptions.get("bash").description
+
+    def change_model(self, client: LLMClient, *, provider: str, model: str) -> None:
+        """Execution-thread only: retain messages, tools and all diagnostic counters."""
+        self.llm.client = client
+        self.settings.provider, self.settings.model = provider, model
+        self.compactor.model = self.memory.model = model
+        if not self.settings.goal_evaluator_model and isinstance(self.goal.evaluator, PromptGoalEvaluator):
+            self.goal.evaluator.llm = (ObservedLLM(self.llm, self.diagnostics, "goal_evaluation")
+                                       if self.diagnostics else self.llm)
+
     def close(self) -> None:
         try:
             if self.teams is not None:

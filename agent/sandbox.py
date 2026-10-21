@@ -13,7 +13,7 @@ class DockerSandbox:
         self.workspace=Path(workspace).resolve()
         if not self.workspace.is_dir():
             raise ValueError(f"工作目录不存在: {self.workspace}")
-        self.name=f"harness-{uuid.uuid4().hex[:12]}"
+        self.name=f"minicode-{uuid.uuid4().hex[:12]}"
         self.started=False
         self.read_only = read_only
 
@@ -48,7 +48,7 @@ class DockerSandbox:
             "--mount",
             f"type=bind,source={self.workspace},target=/workspace" + (",readonly" if self.read_only else ""),
             "--workdir", "/workspace",
-            "harness-sandbox:dev",
+            "minicode-sandbox:dev",
             "sleep", "infinity",
         ])
 

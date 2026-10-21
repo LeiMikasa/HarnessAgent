@@ -26,7 +26,22 @@ from .shell import shell_guidance
 
 IDENTITY = (
     "You are a coding agent working in {workdir}. "
-    "Use tools to solve tasks. Act, don't explain what you are about to do."
+    "Use tools to solve tasks and carry the work through to completion."
+)
+
+USER_FACING_UPDATES = (
+    "Keep the user informed in their language. For a substantial task, include "
+    "a brief user-facing text block explaining your next step before your first "
+    "tool calls, in the SAME response as those calls. Continue working after "
+    "that update; an opening explanation alone is not task completion. During "
+    "longer tasks, provide short progress updates after several tool rounds and "
+    "when you discover an important finding, encounter a blocker, or change "
+    "the plan. State what you found and what you will do next, grounded in "
+    "observed results. These updates must be ordinary answer text, not thinking "
+    "blocks or tool arguments. Do not describe every tool call, repeat earlier "
+    "updates, or reveal private reasoning. Simple questions and single small "
+    "lookups do not need a separate opening update. Finish with a concise report "
+    "of the result, relevant verification and any unresolved blocker."
 )
 
 EXECUTION_EFFICIENCY = (
@@ -75,7 +90,14 @@ TEAM_DEVELOPMENT_NOTE = (
     "7. Run appropriate project-level checks on the integrated code. If a test fails, fix or "
     "report it; do not declare the overall task complete while required deliveries, integration, "
     "or verification remain unfinished. Report artifact paths and verified results. "
-    "Push to a remote only when the user has authorized publishing."
+    "Push to a remote only when the user has authorized publishing.\n"
+    "8. After integration and successful project-level verification, ensure completed tasks "
+    "have released their worktree leases, then call remove_worktree with delete_branch=true "
+    "for each finished temporary worktree. Preserve any worktree or branch requested by the user. "
+    "If cleanup is refused or only partially succeeds, report exactly what remains; do not force "
+    "deletion or discard files to bypass the guard. Cherry-picked or squashed deliveries may "
+    "require keeping their original branches because Git ancestry cannot verify integration. "
+    "Git ancestry checks do not replace functional tests."
 )
 
 
@@ -96,7 +118,7 @@ def build_system_prompt(
     sandbox_enabled: bool = False,
 ) -> str:
     """Assemble the full system prompt."""
-    sections: list[str] = [IDENTITY.format(workdir=workdir), EXECUTION_EFFICIENCY] # 身份
+    sections: list[str] = [IDENTITY.format(workdir=workdir), USER_FACING_UPDATES, EXECUTION_EFFICIENCY] # 身份
 
     environment = [
         f"Workspace root: {workdir}",

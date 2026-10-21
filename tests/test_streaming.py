@@ -4,7 +4,7 @@ import threading
 from types import SimpleNamespace as NS
 
 from common import HarnessCase, make_settings
-from agent.llm import AnthropicLLM, LLMError, MockLLM
+from agent.llm import AnthropicLLM, LLMError, MockLLM, extract_thinking
 from agent.loop import run_loop
 from agent.tools.registry import ToolContext, ToolRegistry
 
@@ -99,6 +99,51 @@ class StreamingTests(HarnessCase):
         self.assertEqual(len(messages), 1)
         self.assertFalse(stream.final_read)
         self.assertTrue(any(e.kind == "model_failed" for e in events))
+
+    def test_thinking_has_its_own_stream_and_never_includes_signature_or_redacted_data(self):
+        content = [{"type": "thinking", "thinking": "检查项目", "signature": "signature-secret"},
+                   {"type": "redacted_thinking", "data": "opaque-secret"},
+                   {"type": "text", "text": "开始处理"}]
+        stream = StreamFixture([
+            delta("thinking_delta", thinking="检查"), delta("thinking_delta", thinking="项目"),
+            delta("signature_delta", signature="signature-secret"),
+            delta("text_delta", text="开始处理"), NS(type="message_stop"),
+        ], response(content))
+        thinking, text = [], []
+        result = adapter(stream).create(system="sys", messages=[], tools=[],
+                                        on_text=text.append, on_thinking=thinking.append)
+        self.assertEqual(thinking, ["检查", "项目"])
+        self.assertEqual(text, ["开始处理"])
+        self.assertEqual(extract_thinking(result.content), "检查项目")
+        self.assertEqual(result.content[0]["signature"], "signature-secret")
+        self.assertTrue(stream.closed)
+
+    def test_loop_emits_thinking_before_tools_without_extra_model_calls(self):
+        executed = []
+        registry = ToolRegistry()
+        registry.add("inspect", "inspect", {}, lambda a, c: executed.append(True) or "found", read_only=True)
+        thinking = {"type": "thinking", "thinking": "检查现有配置", "signature": "sig"}
+        client = MockLLM(script=[[thinking, {"tool": "inspect", "input": {}}], "完成"])
+        result, messages, events = self.drive(client, registry)
+        self.assertTrue(result.ok)
+        self.assertEqual(executed, [True])
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual([event.text for event in events if event.kind == "thinking_delta"], ["检查现有配置"])
+        ended = [event for event in events if event.kind == "model_end"]
+        self.assertEqual(ended[0].text, "")
+        self.assertEqual(ended[0].data["thinking"], "检查现有配置")
+        self.assertEqual(messages[1]["content"][0]["signature"], "sig")
+        self.assertLess(next(i for i, e in enumerate(events) if e.kind == "thinking_delta"),
+                        next(i for i, e in enumerate(events) if e.kind == "tool_start"))
+
+    def test_cancel_during_thinking_closes_stream_without_accepting_tools(self):
+        stop = threading.Event()
+        stream = StreamFixture([delta("thinking_delta", thinking="部分思考"), NS(type="message_stop")], response([]))
+        with self.assertRaises(LLMError):
+            adapter(stream).create(system="sys", messages=[], tools=[], on_thinking=lambda text: stop.set(),
+                                   should_cancel=stop.is_set)
+        self.assertTrue(stream.closed)
+        self.assertFalse(stream.final_read)
 
     def test_stream_exception_does_not_replay_or_execute_partial_tool_call(self):
         stream = StreamFixture([delta("text_delta", text="部分文字"), ConnectionError("broken")], response([]))

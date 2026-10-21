@@ -1,4 +1,4 @@
-"""HarnessAgent -- a modular coding-agent harness.
+"""minicode -- a modular coding-agent harness.
 
 Agency comes from the model; this package is the vehicle.  Every module here
 gives the model one more capability inside a single, unchanged agent loop:

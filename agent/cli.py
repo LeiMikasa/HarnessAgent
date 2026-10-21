@@ -25,7 +25,7 @@ from .config import load_settings
 from .runtime import Runtime
 
 BANNER = (
-    "\033[36mHarnessAgent\033[0m -- a coding-agent harness.\n"
+    "\033[36mminicode\033[0m -- a coding-agent harness.\n"
     "Type a request, or :help for harness commands. "
     ":quit (or q) to exit.\n"
 )
@@ -34,7 +34,7 @@ BANNER = (
 QUIT_WORDS = frozenset({"q", "quit", "exit", "bye"})
 
 HELP = """\
-Harness commands
+minicode commands
   :help              this text
   :status            configuration, tool count, counters
   :tools             every registered tool
@@ -54,7 +54,7 @@ Harness commands
 # 定义启动时能输入哪些参数
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(       # 创建解析器
-        prog="agent",
+        prog="minicode",
         description="A modular coding-agent harness.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
