@@ -132,7 +132,7 @@ async function save() {
           {{
             mode === "full"
               ? "本会话后续工具将在宿主机执行，直到再次切换权限。"
-              : "通过 Docker 限制工作区访问；切换时会重建容器，原容器里的后台进程将结束。"
+              : "命令通过 Docker 隔离，文件工具在本机检查权限；切换时关闭旧容器，容器后台进程将结束。"
           }}
         </p>
         <label v-if="needsFullConfirmation" class="settings-confirm"

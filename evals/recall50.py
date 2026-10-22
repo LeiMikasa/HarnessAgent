@@ -20,7 +20,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
-from agent.config import load_settings
+from agent.config import Settings, load_settings
 from agent.context import ContextCompactor
 from agent.llm import LLMResponse, build_client
 from agent.permissions import DENY
@@ -100,10 +100,17 @@ class CheckpointLLM(MeasuredLLM):
 
 
 def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
-               model: str | None, max_turns: int, max_tokens: int) -> dict[str, Any]:
-    case = materialize(spec)
+               model: str | None, max_turns: int, max_tokens: int, *,
+               case: dict[str, Any] | None = None, grader=grade_answer,
+               run_timeout: float | None = None) -> dict[str, Any]:
+    case = materialize(spec) if case is None else case
     workspace = run_dir / "workspace"
     workspace.mkdir()
+    for relative, text in case.get("files", {}).items():
+        target = (workspace / relative).resolve()
+        target.relative_to(workspace.resolve())
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
     result = {"case_id": spec["id"], "family": spec["family"], "placement": spec["placement"],
               "pressure": spec["pressure"], "mode": mode, "provider": provider,
               "status": "runtime_error", "success": False, "expected_items": len(case["expected"]),
@@ -115,13 +122,23 @@ def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
     runtime = None
     llm = None
     try:
-        settings = load_settings(provider=provider, model=model or ("mock-1" if provider == "mock" else None),
-                                 workdir=workspace, state_dir=workspace / ".agent", skill_dirs=[],
-                                 max_turns=max_turns, max_tokens=max_tokens)
+        if provider == "codex":
+            from evals.codex_llm import CodexLLM
+            settings = Settings(provider="codex", model=model or "codex-default",
+                                workdir=workspace, state_dir=workspace / ".agent", skill_dirs=[],
+                                max_turns=max_turns, max_tokens=max_tokens)
+            client = CodexLLM(model, run_dir / "transport")
+            if run_timeout is not None:
+                client.deadline = time.monotonic() + run_timeout
+        else:
+            settings = load_settings(provider=provider, model=model or ("mock-1" if provider == "mock" else None),
+                                     workdir=workspace, state_dir=workspace / ".agent", skill_dirs=[],
+                                     max_turns=max_turns, max_tokens=max_tokens)
+            client = SuiteMockLLM(case) if provider == "mock" else build_client(settings)
         result["model"] = settings.model
-        if provider != "mock" and not settings.api_key:
+        if provider not in {"mock", "codex"} and not settings.api_key:
             raise RuntimeError("API key is missing")
-        llm = CheckpointLLM(SuiteMockLLM(case) if provider == "mock" else build_client(settings), run_dir / "telemetry.json")
+        llm = CheckpointLLM(client, run_dir / "telemetry.json")
         runtime = Runtime(settings, llm, teams_enabled=False, memory_enabled=False,
                           compaction_enabled=mode == "compact", approval=DENY)
         for name in runtime.tools.names():
@@ -130,7 +147,7 @@ def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
         runtime.active_request = case["prompt"]
         runtime.messages.extend([*case["history"], {"role": "user", "content": case["prompt"]}])
         loop = runtime.run_turn()
-        grading = grade_answer(workspace, case)
+        grading = grader(workspace, case)
         result["grading"] = grading
         result["answer_state"] = ("missing" if not (workspace / "answer.json").exists()
                                   else "invalid" if grading["format_error"] else "valid")
@@ -255,7 +272,7 @@ def write_report(batch: Path, summary: dict[str, Any]) -> None:
              "本批为合成历史上的一次对照观察，不是通用 Agent 基准。", "",
              "任务召回率按正常结束后提交的正确项 / 全部目标项计算，保持 JSON 类型；未完成、超时和无法解析的输出按零项召回计入分母。",
              "这是历史检索任务的最终成绩，不能解释成压缩归档的信息保留率。",
-             "整例通过要求六项全部正确、缺失值正确返回 null、格式正确且 Agent 正常结束。", "",
+             "整例通过要求全部目标项正确、缺失值正确返回 null、格式正确且 Agent 正常结束。", "",
              "| 模式 | 任务正确项 | 任务召回率 | 整例通过 | 正确拒答 | 模型调用（已记录） |",
              "| --- | ---: | ---: | ---: | ---: | ---: |"]
     for mode, total in summary["totals"].items():

@@ -1,4 +1,4 @@
-"""Real Docker smoke check for edit_file/glob/grep; no paid model calls."""
+"""Host file tools plus Docker Bash share files and enforce boundaries; no model calls."""
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,9 +11,13 @@ def main():
     scratch.mkdir(exist_ok=True)
     # A new workspace on every run; existing practice files are left alone.
     with TemporaryDirectory(prefix="sandbox-files-", dir=scratch) as directory:
+        workspace = Path(directory) / "project"
+        workspace.mkdir()
+        outside = Path(directory) / "outside.txt"
+        outside.write_text("private-outside", encoding="utf-8")
         runtime = Runtime.create(
-            provider="mock", workdir=directory, sandbox_enabled=True,
-            teams_enabled=False, memory_enabled=False, approval="allow",
+            provider="mock", workdir=workspace, permission_mode="workspace",
+            teams_enabled=False, memory_enabled=False, approval="deny",
         )
         number = 0
 
@@ -56,36 +60,36 @@ def main():
             assert result.error_code == "INVALID_ARGUMENT", result
             print("PASS: grep regex, include, line numbers, invalid regex")
 
-            # Windows absolute workspace paths are translated for the container.
-            result = call("grep", pattern="8081", path=str(Path(directory) / path))
+            result = call("grep", pattern="8081", path=str(workspace / path))
             assert result.ok and "8081" in result, result
-            print("PASS: Windows absolute path")
+            assert call("read_file", path="/workspace/" + path) == "端口=8081\nname=B\nname=B"
+            assert runtime.sandbox is None, "File tools unexpectedly started Docker"
+            print("PASS: host absolute path and /workspace alias, no Docker for files")
 
-            box = runtime.sandbox
-            # Direct calls exercise container checks independently of permission hooks.
-            for result in (
-                box.edit_file({"path": "/etc/passwd", "old_text": "root", "new_text": "changed"}),
-                box.glob({"pattern": "/etc/*"}),
-                box.grep({"path": "/etc/passwd", "pattern": "root"}),
-                box.glob({"pattern": "../*"}),
+            # Direct registry calls also contain paths without permission hooks.
+            for name, args in (
+                ("read_file", {"path": str(outside)}),
+                ("edit_file", {"path": "/workspace/../outside.txt", "old_text": "private", "new_text": "changed"}),
+                ("glob", {"pattern": "../*"}),
+                ("grep", {"path": str(outside), "pattern": "private"}),
             ):
+                result = runtime.tools.dispatch(name, args, runtime.lead_ctx)
                 assert result.error_code == "PERMISSION_DENIED", result
-
-            # Symlink targets outside the workspace must not be returned or read.
-            command = box.execute("ln -s /etc/passwd /workspace/outside-link")
-            assert command.returncode == 0, command.stderr
-            assert box.glob({"pattern": "outside-link"}) == "(no matches)"
-            assert box.grep({"path": "outside-link", "pattern": "root"}).error_code == "PERMISSION_DENIED"
-            assert box.edit_file({"path": "outside-link", "old_text": "root", "new_text": "changed"}).error_code == "PERMISSION_DENIED"
-            print("PASS: absolute/parent/symlink escapes blocked")
-            command = box.execute("unlink /workspace/outside-link")
-            assert command.returncode == 0, command.stderr
+            assert outside.read_text(encoding="utf-8") == "private-outside"
+            print("PASS: host absolute/parent/alias escapes blocked without hooks")
 
             assert call("write_file", path="many.txt", content="needle\n" * 501).ok
             result = call("grep", pattern="needle", path="many.txt")
             assert result.ok and len(result.splitlines()) == 501 and "results limited" in result, result
             print("PASS: grep 500-match limit")
-            print("All Docker file-tool checks passed.")
+            result = call("bash", command="printf from-container > src/nested/shared.txt")
+            assert result.ok, result
+            assert call("read_file", path="/workspace/src/nested/shared.txt") == "from-container"
+            assert call("write_file", path="src/nested/shared.txt", content="from-host").ok
+            result = call("bash", command='python3 -c "from pathlib import Path; assert Path(\'src/nested/shared.txt\').read_text() == \'from-host\'; print(\'shared-ok\')"')
+            assert result.ok and "shared-ok" in result, result
+            print("PASS: Docker Bash and host file tools see the same bind-mounted files")
+            print("All hybrid file-tool checks passed.")
         finally:
             runtime.close()
 

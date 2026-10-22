@@ -287,6 +287,7 @@ class HarnessApp(App[int]):
             return
         if text.strip() == ":clear":
             self.runtime.messages.clear()
+            self.runtime.lead_ctx.files.clear()
             self.runtime.goal.clear()
             await self.query_one("#chat", VerticalScroll).remove_children()
             self.model_panes.clear()

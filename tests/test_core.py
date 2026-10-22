@@ -217,10 +217,11 @@ class BasicToolTests(HarnessCase):
     def test_edit_requires_a_unique_match(self):
         self.write("dup.txt", "same same")
         runtime = self.make_runtime(
-            script=[{"tool": "edit_file", "input": {"path": "dup.txt", "old_text": "same", "new_text": "x"}}, "ok"]
+            script=[{"tool": "read_file", "input": {"path": "dup.txt"}},
+                    {"tool": "edit_file", "input": {"path": "dup.txt", "old_text": "same", "new_text": "x"}}, "ok"]
         )
         runtime.submit("ambiguous edit")
-        self.assertIn("appears 2 times", self.tool_result_texts(runtime)[0])
+        self.assertIn("appears 2 times", self.tool_result_texts(runtime)[-1])
         self.assertEqual((self.tmp / "dup.txt").read_text(encoding="utf-8"), "same same")
 
     def test_glob_and_grep(self):

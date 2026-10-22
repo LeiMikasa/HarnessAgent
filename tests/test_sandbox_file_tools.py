@@ -127,19 +127,21 @@ class SandboxFileToolTests(HarnessCase):
                      "GREP_MAX_FILE_BYTES", "GREP_LINE_LIMIT"):
             self.assertEqual(getattr(worker, name), getattr(basic, name))
 
-    def test_enabled_routes_to_container_without_host_file_access(self):
+    def test_enabled_file_tools_use_host_without_starting_container(self):
         box = Mock()
         runtime = SimpleNamespace(sandbox_enabled=True, get_sandbox=Mock(return_value=box))
         ctx = ToolContext(make_settings(self.tmp), self.tmp, runtime=runtime)
         calls = [(basic.run_edit_file, "edit_file", {"path": "x", "old_text": "a", "new_text": "b"}),
                  (basic.run_glob, "glob", {"pattern": "**/*"}),
                  (basic.run_grep, "grep", {"pattern": "needle"})]
-        with patch.object(basic, "safe_path", side_effect=AssertionError("host path access")), \
-             patch.object(basic.globlib, "glob", side_effect=AssertionError("host search")):
-            for handler, name, args in calls:
-                getattr(box, name).return_value = ToolResult("container result")
-                self.assertEqual(handler(args, ctx), "container result")
-                getattr(box, name).assert_called_once_with(args)
+        self.write("x", "a needle")
+        self.assertTrue(basic.run_read_file({"path": "x"}, ctx).ok)
+        for handler, name, args in calls:
+            output = handler(args, ctx)
+            self.assertTrue(ToolResult(output).ok)
+            getattr(box, name).assert_not_called()
+        self.assertEqual((self.tmp / "x").read_text(encoding="utf-8"), "b needle")
+        runtime.get_sandbox.assert_not_called()
 
     def test_request_json_preserves_regex_unicode_and_does_not_mutate_args(self):
         box = DockerSandbox(str(self.tmp))
@@ -155,7 +157,7 @@ class SandboxFileToolTests(HarnessCase):
         compile(positional[0][6], "<container-worker>", "exec")
         self.assertEqual(positional[0][-1], "grep")
 
-    def test_docker_error_never_falls_back_to_host(self):
+    def test_file_tools_work_independently_of_docker_errors(self):
         self.write("a.txt", "before")
         box = DockerSandbox(str(self.tmp))
         box.started = True
@@ -163,10 +165,11 @@ class SandboxFileToolTests(HarnessCase):
         runtime = SimpleNamespace(sandbox_enabled=True, get_sandbox=lambda _: box)
         ctx = ToolContext(make_settings(self.tmp), self.tmp, runtime=runtime)
         registry = basic.register_basic_tools(ToolRegistry(), sandbox_enabled=True)
+        self.assertTrue(registry.dispatch("read_file", {"path": "a.txt"}, ctx).ok)
         result = registry.dispatch("edit_file", {"path": "a.txt", "old_text": "before", "new_text": "after"}, ctx)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.execution_status, "unknown")
-        self.assertEqual((self.tmp / "a.txt").read_text(encoding="utf-8"), "before")
+        self.assertTrue(result.ok)
+        box._docker.assert_not_called()
+        self.assertEqual((self.tmp / "a.txt").read_text(encoding="utf-8"), "after")
 
     def test_timeout_closes_only_current_container(self):
         box = DockerSandbox(str(self.tmp))

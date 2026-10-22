@@ -1,5 +1,9 @@
 # Agent 任务评测（试运行）
 
+## 新版工作交接场景与 Codex 真实模型
+
+新增独立的 50 个合成场景：任务交接、需求修订、相似项目干扰、文件状态变化和混合历史，各 10 例。每例 8 项事实与 2 项未知信息；默认仅试跑一组成对 Mock。使用 `python -m evals.recall_real --provider codex --ids live-files-orders` 可通过本机 ChatGPT 登录的 Codex CLI 产生真实模型输出，工具、权限与压缩仍由 minicode 执行。会消耗 Codex 使用额度，token 包含 CLI 开销。完整规则和命令见 [新版评测说明](../docs/minicode新版召回评测.md)。旧数据集和报告保留。
+
 ## 50 组逐项召回与 token 对照
 
 新增固定的 50 个合成测试条件，覆盖分散信息、多条约束、版本修订、相似干扰及长文本摘要。每例检查六项已知信息及一项正确拒答，计算逐项召回率、整例通过率、原始供应商 token 用量和成对降幅。先运行 `python -m evals.recall50 --provider mock` 检查流程；真实运行使用 `--provider deepseek`，默认 100 次 Agent 运行，每次可能有多个模型调用。可用 `--limit 5` 小批量试跑及 `--resume` 续跑。完整设计、指标定义和费用边界见 [使用说明](../docs/50组上下文召回评测使用说明.md)。

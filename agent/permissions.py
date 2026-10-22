@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from .workspace_paths import host_workspace_path
+
 # --------------------------------------------------------------------------
 # Gate 1: the deny list
 # --------------------------------------------------------------------------
@@ -156,11 +158,8 @@ def _escapes_workspace(tool_name: str, args: dict) -> bool:
         if not isinstance(raw, str) or not raw.strip():
             continue
         try:
-            # A container /workspace path names the mounted host workspace,
-            # unless the model explicitly requests host execution.
-            if (_ACTIVE_SANDBOX.get() and args.get("execution_mode") != "host"
-                    and (raw == "/workspace" or raw.startswith("/workspace/"))):
-                raw = raw[len("/workspace"):].lstrip("/") or "."
+            raw = host_workspace_path(raw, root, sandbox_enabled=_ACTIVE_SANDBOX.get(),
+                                      execution_mode=args.get("execution_mode", "default"))
             path = Path(raw).expanduser()
             if key == "pattern":
                 if ".." in path.parts:
@@ -370,10 +369,14 @@ class PermissionManager:
         if host_required:
             from .shell import shell_name
 
+            boundary = (
+                "本次命令将在宿主机执行，绕过 Docker 隔离。"
+                if tool_name == "bash" else
+                "文件工具在宿主机执行；本次将放宽应用层的工作区或只读限制。"
+            )
             reason = (
                 f"{HOST_APPROVAL_PREFIX}\n"
-                "本次工具将在宿主机执行，绕过 Docker 文件隔离；"
-                "只批准当前调用，后续调用仍使用原沙箱。\n"
+                f"{boundary}只批准当前调用，后续调用仍遵循原权限模式。\n"
                 f"工作目录：{_ACTIVE_WORKDIR.get()}\n"
                 f"宿主机命令解释器：{shell_name()}\n"
                 f"申请原因：{args.get('justification') or '目标路径在工作区之外'}"

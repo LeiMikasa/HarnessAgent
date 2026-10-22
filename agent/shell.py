@@ -34,12 +34,16 @@ def shell_guidance(*,sandbox_enabled: bool=False) -> str:
             "through /bin/bash. Its working directory is /workspace, "
             "which is the mounted host project directory. "
             "Use Linux Bash syntax and container paths in shell commands. "
+            "Bash pipefail is enabled: a failed pipeline stage is reported even if tail/head succeeds. "
+            "A producer may report SIGPIPE when head stops reading; inspect that cause instead of "
+            "treating every nonzero pipeline as a dependency problem. "
             "Python is available as python3. "
             "Network access uses Docker bridge networking. "
             "Each call starts a new shell in /workspace; "
             "cd and exported variables do not persist across calls. "
-            "The other five basic file tools also use the container; "
-            "prefer workspace-relative paths. Host files outside the workspace "
+            "File tools execute on the host with application permission checks; "
+            "prefer workspace-relative paths. /workspace paths map to the mounted host workspace "
+            "for default file calls. File tools cannot access container-only files. Host files outside the workspace "
             "require one-call human approval. For a host command, set "
             "execution_mode='host' and justification; approval applies to one invocation "
             f"only. Host commands use {shell_name()}, with host paths and shell syntax, "
@@ -51,8 +55,8 @@ def shell_guidance(*,sandbox_enabled: bool=False) -> str:
     if sys.platform == "win32":
         description += (
             "Use cmd syntax, not PowerShell or POSIX shell syntax; the tool name does not imply Bash. "
-            "Unix utilities such as tail are not guaranteed to exist. Use glob/grep/read_file for "
-            "file inspection, or invoke a specific installed interpreter explicitly. "
+            "Unix utilities such as tail are not guaranteed to exist. File discovery, content search "
+            "and text reading must use the dedicated file tools, not shell commands or scripts. "
         )
     return description + (
         "For complex JavaScript or Python diagnostics, write a short script in the workspace and "

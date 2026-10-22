@@ -763,7 +763,7 @@ onBeforeUnmount(() => source?.close());
           {{
             form.permission_mode === "full"
               ? "完全权限使用当前系统用户的权限，不受 Docker 文件隔离保护。"
-              : "使用 Docker 隔离工作区。需要访问宿主机时，会请求你批准本次操作。"
+              : "命令通过 Docker 隔离；文件工具在本机检查权限。工作区外访问需批准。"
           }}
         </p>
         <p

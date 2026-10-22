@@ -409,9 +409,9 @@ class Runtime:
             prompt += (
                 f"\n\nPermission mode: {self.permission_mode}. "
                 "In read-only mode only inspection and todo bookkeeping are permitted by default; "
-                "ordinary shell commands and mutations are blocked. In workspace mode basic tools "
-                "run inside Docker. In full mode basic tools run directly on the host. "
-                "For one exceptional host call in read-only/workspace mode, set execution_mode='host' "
+                "ordinary shell commands and mutations are blocked. In workspace mode bash runs in Docker; "
+                "file tools run on the host with workspace path checks. In full mode all basic tools run on the host. "
+                "For one exceptional unrestricted call in read-only/workspace mode, set execution_mode='host' "
                 "and provide justification; a human must approve that exact invocation. "
                 "Never repeat a denied request unchanged."
             )

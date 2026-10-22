@@ -193,6 +193,7 @@ class ToolRecoveryTests(HarnessCase):
 
     def test_precondition_failure_requires_inspection_and_exhausts_repairs(self):
         self.write("a.txt", "actual content")
+        self.assertTrue(self.call("read_file", {"path": "a.txt"}).ok)
         for index in range(3):
             result = self.call("edit_file", {"path": "a.txt", "old_text": f"wrong-{index}", "new_text": "bad"})
             self.assertEqual(result.error_code, "PRECONDITION_FAILED")
@@ -205,6 +206,7 @@ class ToolRecoveryTests(HarnessCase):
 
     def test_successful_repair_clears_target_budget(self):
         self.write("a.txt", "actual")
+        self.assertTrue(self.call("read_file", {"path": "a.txt"}).ok)
         self.call("edit_file", {"path": "a.txt", "old_text": "wrong", "new_text": "new"})
         self.assertTrue(self.call("edit_file", {"path": "a.txt", "old_text": "actual", "new_text": "new"}).ok)
         self.assertEqual(self.recovery.failures, {})

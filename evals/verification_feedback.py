@@ -160,7 +160,9 @@ class FeedbackMockLLM:
             return LLMResponse(content=[{"type": "text", "text": "Done."}], stop_reason="end_turn")
         self.counter += 1
         return LLMResponse(
-            content=[{"type": "tool_use", "id": f"feedback_mock_{self.counter}",
+            content=[{"type": "tool_use", "id": f"feedback_read_{self.counter}",
+                      "name": "read_file", "input": {"path": "csv_line.py"}},
+                     {"type": "tool_use", "id": f"feedback_mock_{self.counter}",
                       "name": "write_file", "input": {"path": "csv_line.py", "content": content}}],
             stop_reason="tool_use",
         )

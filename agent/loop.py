@@ -38,7 +38,7 @@ from .diagnostics import RunTrace, traced_loop
 from .events import POST_TOOL_USE, PRE_TOOL_USE, STOP, Hooks, StopDirective
 from .llm import LLMClient, extract_text, extract_thinking, make_tool_result, tool_use_blocks
 from .tools.registry import ToolContext, ToolRegistry
-from .tools.feedback import CommandFeedback
+from .tools.feedback import CommandFeedback, ExecutionFeedback
 from .tools.result import ToolResult
 from .tools.recovery import ToolRecovery
 from .ui_events import UIEvent
@@ -121,7 +121,8 @@ def execute_tool(
                 recovery.record(name, args, output, phase="permission", attempt=0)
                 return finish(output)
             on_host = bool(ctx.extra.get(HOST_EXECUTION_KEY))
-            execution_mode = "host" if on_host or not getattr(ctx.runtime, "sandbox_enabled", False) else "sandbox"
+            execution_mode = ("sandbox" if name == "bash" and not on_host
+                              and getattr(ctx.runtime, "sandbox_enabled", False) else "host")
             started = time.monotonic()
             output = registry.dispatch(name, args, ctx)
         finally:
@@ -168,6 +169,7 @@ def run_loop(
     recovery_note = ""
     command_note = ""
     command_feedback = CommandFeedback()
+    execution_feedback = ExecutionFeedback()
     result = LoopResult() # 创建默认结果对象
     recovery = ToolRecovery()
     ctx.extra["tool_attempts"] = recovery.events
@@ -217,6 +219,9 @@ def run_loop(
             system_prompt += "\n\n" + recovery_note
         if command_note:
             system_prompt += "\n\n" + command_note
+        execution_note = execution_feedback.render(ctx)
+        if execution_note:
+            system_prompt += "\n\n" + execution_note
 
         # -- re-read the tool pool on EVERY iteration ----------------------
         # Not an optimisation detail: `connect_mcp` adds tools mid-turn, so a
@@ -408,6 +413,7 @@ def run_loop(
             ui("tool_end", ui_call_id, str(output)[:8000], ok=output.ok,
                error_code=output.error_code, elapsed=time.monotonic() - started, result_chars=len(output))
             tool = registry.get(name) if isinstance(name, str) else None
+            execution_feedback.observe(name, block.get("input", {}), output, tool, ctx=ctx)
             advice = command_feedback.observe(name, block.get("input", {}), output, tool)
             if advice:
                 command_notes.append(advice)

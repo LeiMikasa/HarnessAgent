@@ -172,9 +172,16 @@ class FixtureMockLLM:
 
         if not calls:
             return LLMResponse(content=[{"type": "text", "text": "Done."}], stop_reason="end_turn")
+        # Fixture files already exist; the smoke driver obeys the same
+        # read-before-overwrite contract as a real model.
+        observed_calls = []
+        for name, arguments in calls:
+            if name == "write_file":
+                observed_calls.append(("read_file", {"path": arguments["path"]}))
+            observed_calls.append((name, arguments))
         with self._lock:
             blocks = []
-            for name, arguments in calls:
+            for name, arguments in observed_calls:
                 self._next_id += 1
                 blocks.append({"type": "tool_use", "id": f"mock_{self._next_id}",
                                "name": name, "input": arguments})

@@ -132,6 +132,7 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
         workspace = self.tmp / "project"
         workspace.mkdir()
         outside = self.write("outside.txt", "外部资料")
+        (workspace / "inside.txt").write_text("工作区资料", encoding="utf-8")
         runtime = self.make_runtime(
             settings=make_settings(workspace), permission_mode="workspace", teams_enabled=False,
             script=[{"tool": "read_file", "input": {"path": str(outside)}},
@@ -160,15 +161,16 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
             await self.until(pilot, lambda: not app.busy)
             results = self.tool_result_texts(runtime)
             self.assertIn("外部资料" if allow else "PERMISSION_DENIED", results[0])
-            self.assertIn("容器内资料", results[1])
-            box.read_file.assert_called_once_with({"path": "inside.txt"})
+            self.assertIn("工作区资料", results[1])
+            box.read_file.assert_not_called()
+            runtime.get_sandbox.assert_not_called()
             self.assertNotIn("host_execution_approved", runtime.lead_ctx.extra)
             self.assertIn("工作区内修改", str(app.query_one("#features", Static).render()))
 
-    async def test_host_approval_is_explicit_under_auto_allow_and_returns_to_container(self):
+    async def test_host_approval_is_explicit_under_auto_allow_and_restores_workspace_boundary(self):
         await self.host_approval_case(True)
 
-    async def test_host_approval_escape_denies_and_returns_to_container(self):
+    async def test_host_approval_escape_denies_and_restores_workspace_boundary(self):
         await self.host_approval_case(False)
 
     async def test_cancel_releases_permission_wait_and_prevents_tool_execution(self):
@@ -233,7 +235,11 @@ class TerminalTests(HarnessCase, unittest.IsolatedAsyncioTestCase):
             self.assertTrue(usage.is_on_screen)
             self.assertEqual(usage.region.bottom, app.query_one("#sidebar").region.bottom)
             self.assertGreaterEqual(usage.region.x, app.query_one(Prompt).region.right)
+            self.write("clear-probe.txt", "original")
+            self.assertTrue(runtime.execute_tool({"name": "read_file", "input": {"path": "clear-probe.txt"}}).ok)
             await app.submit(":clear")
+            guarded = runtime.execute_tool({"name": "write_file", "input": {"path": "clear-probe.txt", "content": "bad"}})
+            self.assertEqual(guarded.error_code, "FS_NOT_OBSERVED")
             self.assertIsNone(app.context_usage)
             self.assertIn("等待首轮请求", str(usage.render()))
             self.assertEqual(runtime.llm.calls, [])

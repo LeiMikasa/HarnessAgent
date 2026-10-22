@@ -58,6 +58,7 @@ from .llm import LLMClient, extract_text
 from .tasks import COMPLETED, IN_PROGRESS, PENDING, Task, TaskError, TaskStore
 from .todo import TodoList
 from .tools.registry import Tool, ToolContext, ToolRegistry
+from .tools.filesystem import ObservedFiles
 
 # --------------------------------------------------------------------------
 # Constants
@@ -657,6 +658,7 @@ class Teammate:
         self.state = TeammateState(name=name, role=role, prompt=prompt)
         self.messages: list[dict] = []
         self.todos = TodoList()
+        self.file_observations = ObservedFiles()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -698,6 +700,7 @@ class Teammate:
             interactive=False,   # a teammate must never block on a prompt
             runtime=runtime,
             extra={"allow_outside": False, "teammate": self.name},
+            files=self.file_observations,
         )
 
     def system_prompt(self) -> str:

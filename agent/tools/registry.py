@@ -29,6 +29,7 @@ from referencing.exceptions import NoSuchResource
 
 from ..config import Settings
 from .result import ToolResult, tool_error
+from .filesystem import ObservedFiles
 
 
 def _reject_reference(uri: str):
@@ -46,6 +47,7 @@ class ToolContext: # 表示一次工具调用的上下文，会传给每个工�
     interactive: bool = True       # may this caller prompt a human? 是否允许向人类提问
     runtime: Any = None            # back-reference for tools that need the harness 反向引用，工具需要访问 harness/runtime 时用
     extra: dict = field(default_factory=dict) # 扩展字段
+    files: ObservedFiles = field(default_factory=ObservedFiles, repr=False, compare=False)
     # 复制一份上下文，返回一个对象
     def child(self, **overrides: Any) -> "ToolContext":
         """A copy with fields replaced -- used to enter a worktree, or to hand a

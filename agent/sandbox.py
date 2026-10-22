@@ -4,9 +4,25 @@ import uuid
 import json
 import os
 from pathlib import PurePosixPath
-from .tools.result import ToolResult,tool_error
+from .tools.result import ToolError,ToolResult,tool_error
 from textwrap import dedent
 from .shell import noninteractive_process_options
+
+
+class SandboxUnavailable(ToolError):
+    """Docker infrastructure prevented the requested command from starting."""
+
+    def __init__(self, detail: str):
+        super().__init__(
+            "SANDBOX_UNAVAILABLE",
+            "Docker sandbox is unavailable; the requested command did not run. "
+            "This affects sandbox Bash calls; workspace file tools remain available on the host. "
+            "Restore Docker/the sandbox image or container, then retry after evidence of that change. "
+            "Changing the shell command does not repair the environment. "
+            "Do not switch to host execution without the required permission. Detail: " + detail,
+            action="restore_environment",
+        )
+
 
 class DockerSandbox:
     def __init__(self,workspace:str, *, read_only: bool = False):
@@ -33,7 +49,8 @@ class DockerSandbox:
         """启动一个后台容器"""
         if self.started:
             return
-        result=self._docker([
+        try:
+            result=self._docker([
             "run",
             "--detach",
             "--name",self.name,
@@ -50,10 +67,12 @@ class DockerSandbox:
             "--workdir", "/workspace",
             "minicode-sandbox:dev",
             "sleep", "infinity",
-        ])
+            ])
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxUnavailable(str(exc)) from exc
 
         if result.returncode != 0:
-            raise RuntimeError(f"容器启动失败: {result.stderr}")
+            raise SandboxUnavailable(str(result.stderr).strip())
 
         self.started=True
         print("本次创建的容器名称：", self.name)
@@ -61,14 +80,19 @@ class DockerSandbox:
     def execute(self,command: str,timeout=120):
         """在已有的容器内执行命令，保留退出码与输出"""
         if not self.started:
-            raise RuntimeError("请先调用 start()")
+            raise SandboxUnavailable("The sandbox container has not been started.")
         try:
-            return self._docker([
+            result = self._docker([
                 "exec",
                 "--workdir", "/workspace",
                 self.name,
-                "bash", "-c", command
+                "bash", "-o", "pipefail", "-c", command
             ],timeout=timeout)
+            # After exec is dispatched, preserve command failures/unknown side
+            # effects. Command output alone cannot prove Docker did not start it.
+            return result
+        except OSError as exc:
+            raise SandboxUnavailable(str(exc)) from exc
         except subprocess.TimeoutExpired as exc:
             # 结束Docker客户端的等待，不保证容器里的命令停止
             # 这里关闭整个任务容器，终止其中的进程

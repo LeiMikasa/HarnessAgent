@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from .result import ToolResult, tool_error
+from ..workspace_paths import host_workspace_path
 # 这是模型的修正调用次数
 # 记录哪些错误要进入"模型修正次数"
 #  参数不符合规则   工具名不存在   文件，任务等目标不存在    操作前提不成立，例如待替换文字找不到
@@ -36,7 +37,10 @@ class ToolRecovery:
                     target = str(args[field])
                     if field == "path" and isinstance(args[field], str):
                         try:
-                            target = os.path.normcase(str((Path(ctx.workdir) / args[field]).resolve()))
+                            raw = host_workspace_path(args[field], ctx.workdir,
+                                                      sandbox_enabled=bool(getattr(ctx.runtime, "sandbox_enabled", False)),
+                                                      execution_mode=args.get("execution_mode", "default"))
+                            target = os.path.normcase(str((Path(ctx.workdir) / Path(raw).expanduser()).resolve()))
                         except (OSError, RuntimeError, ValueError):
                             pass
                     break

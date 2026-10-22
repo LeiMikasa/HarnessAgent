@@ -103,9 +103,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _demo_script() -> list[Any]:
+def _demo_script(workdir: Path | None = None) -> list[Any]:
     """A scripted conversation that exercises the harness offline."""
-    return [
+    script = [
         # 1. plan the work
         {
             "text": "I'll plan this first.",
@@ -153,6 +153,9 @@ def _demo_script() -> list[Any]:
         # 5. finish
         "Wrote greeting.py with a hello(name) function and verified it imports and runs.",
     ]
+    if workdir is not None and (workdir / "greeting.py").is_file():
+        script[1]["tool_calls"].insert(0, {"tool": "read_file", "input": {"path": "greeting.py"}})
+    return script
 
 
 def _print(message: str = "") -> None:
@@ -260,6 +263,7 @@ def _command(runtime: Runtime, raw: str) -> bool:
             _print(f"Invalid goal: {exc}")
     elif name == "clear":
         runtime.messages.clear()
+        runtime.lead_ctx.files.clear()
         runtime.goal.clear()
         _print("Conversation cleared.")
     else:
@@ -296,9 +300,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.demo:
         overrides["provider"] = "mock"
-    script = _demo_script() if args.demo else None
-
     settings = load_settings(args.env_file, **{k: v for k, v in overrides.items() if k != "approval"})
+    script = _demo_script(settings.workdir) if args.demo else None
     permission_mode = args.permission_mode or os.getenv("AGENT_PERMISSION_MODE", "workspace")
     if permission_mode not in ("read-only", "workspace", "full"):
         _print(f"Unknown permission mode: {permission_mode}")

@@ -19,6 +19,7 @@ from agent.permissions import (
 )
 from agent.runtime import Runtime
 from agent.sandbox import DockerSandbox
+from agent.shell import noninteractive_process_options
 from agent.tools.basic import register_basic_tools
 from agent.tools.recovery import ToolRecovery
 from agent.tools.registry import ToolContext, ToolRegistry
@@ -52,22 +53,25 @@ class PermissionModeTests(HarnessCase):
             self.assertNotIn(key, self.ctx.extra)
         return result
 
-    def test_normal_call_uses_container_without_prompt(self):
-        self.box.read_file.return_value = ToolResult("container")
-        self.assertEqual(self.call("read_file", path="a.txt"), "container")
+    def test_normal_file_call_uses_host_without_container_or_prompt(self):
+        (self.workspace / "a.txt").write_text("host file", encoding="utf-8")
+        self.assertEqual(self.call("read_file", path="a.txt"), "host file")
         self.approver.assert_not_called()
-        self.box.read_file.assert_called_once()
+        self.runtime.get_sandbox.assert_not_called()
 
-    def test_outside_read_approved_once_then_normal_call_returns_to_sandbox(self):
+    def test_outside_read_approved_once_then_normal_call_keeps_workspace_boundary(self):
         self.assertEqual(self.call("read_file", path=str(self.outside)), "port=8081")
         self.runtime.get_sandbox.assert_not_called()
         self.assertTrue(is_host_approval(self.approver.call_args.args[2]))
-        self.box.read_file.return_value = ToolResult("container")
-        self.assertEqual(self.call("read_file", path="inside.txt"), "container")
+        (self.workspace / "inside.txt").write_text("inside", encoding="utf-8")
+        self.assertEqual(self.call("read_file", path="inside.txt"), "inside")
         self.assertEqual(self.approver.call_count, 1)
-        self.assertEqual([event["execution_mode"] for event in self.recovery.events], ["host", "sandbox"])
+        self.assertEqual([event["execution_mode"] for event in self.recovery.events], ["host", "host"])
+        self.runtime.get_sandbox.assert_not_called()
 
     def test_denied_outside_write_has_no_side_effect_and_is_asked_again(self):
+        self.assertTrue(self.call("read_file", path=str(self.outside)).ok)
+        self.approver.reset_mock()
         self.approver.side_effect = [False, True]
         args = {"path": str(self.outside), "content": "port=8082"}
         self.assertEqual(self.call("write_file", **args).error_code, "PERMISSION_DENIED")
@@ -78,11 +82,12 @@ class PermissionModeTests(HarnessCase):
         self.runtime.get_sandbox.assert_not_called()
 
     def test_approved_outside_edit_glob_and_grep(self):
+        self.assertTrue(self.call("read_file", path=str(self.outside)).ok)
         self.assertTrue(self.call("edit_file", path=str(self.outside),
                                   old_text="8081", new_text="8082").ok)
         self.assertIn("outside.txt", self.call("glob", pattern=str(self.tmp / "*.txt")))
         self.assertIn("port=8082", self.call("grep", path=str(self.outside), pattern="port"))
-        self.assertEqual(self.approver.call_count, 3)
+        self.assertEqual(self.approver.call_count, 4)
         self.runtime.get_sandbox.assert_not_called()
 
     def test_explicit_host_command_needs_approval_and_next_command_uses_container(self):
@@ -140,6 +145,7 @@ class PermissionModeTests(HarnessCase):
         self.assertEqual(child.extra, {"ordinary": 1})
 
     def test_approver_cannot_change_executed_arguments(self):
+        self.assertTrue(self.call("read_file", path=str(self.outside)).ok)
         def approve(name, args, reason):
             args["content"] = "changed by callback"
             return True
@@ -179,7 +185,7 @@ class PermissionModeTests(HarnessCase):
                            ("edit_file", {"path": "x", "old_text": "a", "new_text": "b"}),
                            ("bash", {"command": "echo x"})):
             self.assertEqual(self.call(name, **args).error_code, "PERMISSION_DENIED")
-        self.box.read_file.return_value = ToolResult("inspection")
+        (self.workspace / "x").write_text("inspection", encoding="utf-8")
         self.assertEqual(self.call("read_file", path="x"), "inspection")
         self.approver.assert_not_called()
 
@@ -194,20 +200,100 @@ class PermissionModeTests(HarnessCase):
         self.manager.mode = FULL
         self.runtime.permission_mode = FULL
         self.runtime.sandbox_enabled = False
+        self.assertTrue(self.call("read_file", path=str(self.outside)).ok)
         self.assertTrue(self.call("write_file", path=str(self.outside), content="full").ok)
         self.assertEqual(self.call("read_file", path=str(self.outside)), "full")
         self.approver.assert_not_called()
         self.runtime.get_sandbox.assert_not_called()
 
     def test_container_error_never_falls_back_to_host(self):
-        self.box.read_file.side_effect = RuntimeError("Docker unavailable")
-        self.assertFalse(self.call("read_file", path="inside.txt").ok)
+        self.box.execute.side_effect = RuntimeError("Docker unavailable")
+        with patch("agent.tools.basic.subprocess.run") as host_run:
+            self.assertFalse(self.call("bash", command="echo probe").ok)
+            host_run.assert_not_called()
         self.approver.assert_not_called()
 
     def test_container_absolute_workspace_path_does_not_request_host_access(self):
-        self.box.read_file.return_value = ToolResult("container")
-        self.assertEqual(self.call("read_file", path="/workspace/nested/x"), "container")
+        (self.workspace / "nested").mkdir()
+        (self.workspace / "nested/x").write_text("mapped file", encoding="utf-8")
+        self.assertEqual(self.call("read_file", path="/workspace/nested/x"), "mapped file")
         self.approver.assert_not_called()
+        self.runtime.get_sandbox.assert_not_called()
+
+    def test_all_file_tools_use_host_and_share_workspace_aliases(self):
+        self.assertTrue(self.call("write_file", path="/workspace/nested/config.txt", content="port=8080").ok)
+        self.assertTrue(self.call("edit_file", path="nested/config.txt", old_text="8080", new_text="8081").ok)
+        self.assertEqual(self.call("read_file", path=str(self.workspace / "nested/config.txt")), "port=8081")
+        self.assertIn("config.txt", self.call("glob", pattern="/workspace/nested/*.txt"))
+        self.assertIn("nested/config.txt:1:port=8081", self.call("grep", path="/workspace/nested", pattern="port"))
+        self.assertEqual((self.workspace / "nested/config.txt").read_text(encoding="utf-8"), "port=8081")
+        self.approver.assert_not_called()
+        self.runtime.get_sandbox.assert_not_called()
+
+    def test_read_only_file_handlers_reject_direct_mutations_without_hooks(self):
+        self.runtime.permission_mode = READ_ONLY
+        (self.workspace / "existing.txt").write_text("before", encoding="utf-8")
+        for name, args in (("write_file", {"path": "new.txt", "content": "new"}),
+                           ("edit_file", {"path": "existing.txt", "old_text": "before", "new_text": "after"})):
+            result = self.registry.dispatch(name, args, self.ctx)
+            self.assertEqual(result.error_code, "PERMISSION_DENIED")
+        self.assertFalse((self.workspace / "new.txt").exists())
+        self.assertEqual((self.workspace / "existing.txt").read_text(encoding="utf-8"), "before")
+        self.assertTrue(self.registry.dispatch("read_file", {"path": "existing.txt"}, self.ctx).ok)
+
+    def test_alias_traversal_is_not_allowed_to_hide_external_paths(self):
+        self.approver.return_value = False
+        for name, args in (("read_file", {"path": "/workspace/../outside.txt"}),
+                           ("write_file", {"path": "/workspace/../outside.txt", "content": "bad"}),
+                           ("glob", {"pattern": "/workspace/../*.txt"}),
+                           ("grep", {"path": "/workspace/..", "pattern": "port"})):
+            self.assertEqual(self.call(name, **args).error_code, "PERMISSION_DENIED")
+        self.assertEqual(self.outside.read_text(encoding="utf-8"), "port=8081")
+        self.assertEqual(self.approver.call_count, 4)
+
+    def test_file_handlers_keep_workspace_boundary_without_permission_hook(self):
+        for name, args in (("read_file", {"path": str(self.outside)}),
+                           ("write_file", {"path": str(self.outside), "content": "bad"}),
+                           ("edit_file", {"path": str(self.outside), "old_text": "8081", "new_text": "bad"}),
+                           ("glob", {"pattern": str(self.tmp / "*.txt")}),
+                           ("grep", {"path": str(self.outside), "pattern": "port"})):
+            self.assertEqual(self.registry.dispatch(name, args, self.ctx).error_code, "PERMISSION_DENIED")
+        self.assertEqual(self.outside.read_text(encoding="utf-8"), "port=8081")
+
+    def test_aliases_share_unknown_write_state_until_complete_host_read(self):
+        original_write = self.registry.get("write_file").handler
+        def lose_acknowledgement(args, ctx):
+            original_write(args, ctx)
+            raise TimeoutError("lost acknowledgement")
+        self.registry.get("write_file").handler = lose_acknowledgement
+        self.assertEqual(self.call("write_file", path="/workspace/state.txt", content="before").execution_status, "unknown")
+        self.assertEqual(self.call("edit_file", path="state.txt", old_text="before", new_text="after").error_code,
+                         "STATE_CHECK_REQUIRED")
+        self.assertTrue(self.call("read_file", path="/workspace/state.txt").ok)
+        self.assertEqual(self.recovery.uncertain_files, set())
+        self.assertTrue(self.call("edit_file", path=str(self.workspace / "state.txt"), old_text="before", new_text="after").ok)
+
+    def test_symlink_target_outside_workspace_requires_approval(self):
+        target = self.tmp / "outside-directory"
+        target.mkdir()
+        (target / "target.txt").write_text("private", encoding="utf-8")
+        link = self.workspace / "outside-link"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            if os.name != "nt":
+                self.skipTest(f"Symlinks unavailable: {exc}")
+            result = subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+                                    capture_output=True, timeout=10, **noninteractive_process_options())
+            if result.returncode:
+                self.skipTest("Neither symlinks nor directory junctions are available")
+        self.approver.return_value = False
+        for name, args in (("read_file", {"path": "/workspace/outside-link/target.txt"}),
+                           ("write_file", {"path": "/workspace/outside-link/target.txt", "content": "bad"}),
+                           ("edit_file", {"path": "/workspace/outside-link/target.txt", "old_text": "private", "new_text": "bad"})):
+            self.assertEqual(self.call(name, **args).error_code, "PERMISSION_DENIED")
+            self.assertEqual(self.registry.dispatch(name, args, self.ctx).error_code, "PERMISSION_DENIED")
+        self.assertEqual((target / "target.txt").read_text(encoding="utf-8"), "private")
 
     def test_permission_workspace_is_isolated_between_threads(self):
         other = self.tmp / "second"

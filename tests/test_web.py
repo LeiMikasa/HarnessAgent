@@ -169,8 +169,9 @@ class WebTests(HarnessCase):
         tool_index = next(i for i, entry in enumerate(entry_events) if entry.get("kind") == "tool")
         self.assertLess(update_index, tool_index)
 
-    def test_approval_endpoint_allows_one_host_read_then_returns_to_container(self):
+    def test_approval_endpoint_allows_one_external_read_then_restores_workspace_boundary(self):
         outside = self.write("outside.txt", "external content")
+        (self.project / "a.txt").write_text("workspace content", encoding="utf-8")
         script = [{"tool": "read_file", "input": {"path": str(outside)}},
                   {"tool": "read_file", "input": {"path": "a.txt"}}, "done"]
         manager, box = self.factory(script)
@@ -188,8 +189,9 @@ class WebTests(HarnessCase):
             self.wait(lambda: not current.busy)
             texts = [entry["text"] for entry in current.snapshot()["timeline"]]
             self.assertIn("external content", texts)
-            self.assertIn("container content", texts)
-            self.assertEqual(box.read_file.call_count, 1)
+            self.assertIn("workspace content", texts)
+            box.read_file.assert_not_called()
+            current.runtime.get_sandbox.assert_not_called()
             self.assertNotIn("host_execution_approved", current.runtime.lead_ctx.extra)
             self.assertEqual(client.post(f"/api/sessions/{identity}/approvals/{request['id']}",
                                          json={"allowed": True}).status_code, 409)

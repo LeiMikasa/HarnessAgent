@@ -82,6 +82,8 @@ class ToolResult(str):
                                "inspect": "Inspect the actual file, path or task state before issuing a corrected operation.",
                                "inspect_state": "The operation may have produced side effects. Inspect actual state; do not blindly repeat it.",
                                "report": "Report the failure or choose an appropriate alternative; do not bypass permissions.",
+                               "restore_environment": "The requested command did not start. Restore the sandbox environment before retrying; changing commands will not help. File tools remain available; host execution still requires permission.",
+                               "reread": "Read the target with read_file, inspect its current content, then retry the intended change. Do not bypass this guard with shell commands or host execution.",
                            }.get(self.action, "Report the failure."),
                            "execution_status": self.execution_status}, ensure_ascii=False)
 
