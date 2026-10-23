@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import uuid
 from pathlib import Path
 
 from ..shell import decode_shell_output, noninteractive_process_options, shell_guidance, shell_name
@@ -24,6 +25,8 @@ from ..workspace_paths import host_workspace_path
 from .registry import ToolContext, ToolRegistry
 from .result import ToolError, ToolResult, tool_error
 from .search import glob_paths, has_brace_expansion
+from .execution import execution_check
+from .feedback import _command_kinds
 
 # Caps.  These exist so one careless command cannot flood the context window.
 MAX_TOOL_OUTPUT = 50_000  # 任何工具输出最多5万字符，超出截断
@@ -106,27 +109,15 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
     command = args.get("command", "")
     if not isinstance(command, str) or not command.strip():
         return tool_error("INVALID_ARGUMENT", "command is required", field="command", action="correct_arguments")
+    invalid = execution_check(args)
+    if invalid is not None:
+        return invalid
 
     timeout = args.get("timeout")
     timeout = BASH_TIMEOUT_SECONDS if not isinstance(timeout, (int, float)) else float(timeout)
 
     child_env = dict(os.environ)
     child_env.setdefault("PYTHONIOENCODING", "utf-8")
-    # try:
-    #     result = subprocess.run(
-    #         command,
-    #         shell=True,
-    #         cwd=str(ctx.workdir),
-    #         capture_output=True, # 捕获 stdout+stderr
-    #         env=child_env,
-    #         timeout=timeout,
-    #     )
-    # except subprocess.TimeoutExpired:
-    #     return tool_error("TIMEOUT", f"Timeout ({timeout:g}s); command may have produced side effects. "
-    #                       "Inspect the actual state before issuing another command.",
-    #                       action="inspect_state", execution_status="unknown")
-    # except (FileNotFoundError, OSError) as exc:
-    #     return ToolResult.from_exception(exc)
     try:
         runtime=ctx.runtime
         if _use_sandbox(args, ctx):
@@ -143,13 +134,15 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
                 timeout=timeout,
                 **noninteractive_process_options(),
             )
-    except (subprocess.TimeoutExpired, TimeoutError):
-        return tool_error(
+    except (subprocess.TimeoutExpired, TimeoutError) as exc:
+        log_note = _save_check_output(args, ctx, getattr(exc, "stdout", None),
+                                      getattr(exc, "stderr", None), "timeout/unknown")
+        return _logged_result(tool_error(
             "TIMEOUT",
-            f"Timeout ({timeout:g}s); inspect actual state before retrying.",
+            f"Timeout ({timeout:g}s); inspect actual state before retrying." + log_note,
             action="inspect_state",
             execution_status="unknown",
-        )
+        ), log_note)
 
     except ToolError as exc:
         return ToolResult.from_exception(exc)
@@ -157,18 +150,43 @@ def run_bash(args: dict, ctx: ToolContext) -> str:
         return ToolResult.from_exception(exc)
     stdout = decode_shell_output(result.stdout).strip()
     stderr = decode_shell_output(result.stderr).strip()
+    log_note = _save_check_output(args, ctx, result.stdout, result.stderr, result.returncode)
     if result.returncode:
         # Reserve room for both streams so a verbose stdout cannot hide stderr.
-        budget = MAX_TOOL_OUTPUT - 300
+        budget = MAX_TOOL_OUTPUT - 300 - len(log_note)
         out_budget = min(len(stdout), budget // 2)
         err_budget = min(len(stderr), budget - out_budget)
         out_budget = min(len(stdout), budget - err_budget)
         output = (f"Exit code: {result.returncode}\nstdout:\n{_clip(stdout, out_budget) or '(empty)'}"
                   f"\nstderr:\n{_clip(stderr, err_budget) or '(empty)'}")
-        return tool_error("COMMAND_FAILED", output,
-                          action="inspect_state", execution_status="unknown")
+        return _logged_result(tool_error("COMMAND_FAILED", output + log_note,
+                          action="inspect_state", execution_status="unknown"), log_note)
     output = "\n".join(part for part in (stdout, stderr) if part)
-    return _clip(output) if output else "(no output)"
+    return _logged_result(ToolResult(_clip(output or "(no output)", MAX_TOOL_OUTPUT - len(log_note) - 100) + log_note), log_note)
+
+
+def _logged_result(result: ToolResult, note: str) -> ToolResult:
+    if note.startswith("\n[command log] "):
+        result.command_log = note.splitlines()[1].removeprefix("[command log] ")
+    return result
+
+
+def _save_check_output(args, ctx, stdout, stderr, returncode) -> str:
+    """Keep full check output before clipping. Logging never changes exit status."""
+    if not args.get("task_reason") and not _command_kinds(args.get("command", "")):
+        return ""
+    try:
+        folder = Path(ctx.settings.state_dir) / "command-logs"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{uuid.uuid4().hex}.log"
+        with path.open("x", encoding="utf-8", errors="replace") as stream:
+            stream.write(f"Exit code: {returncode}\nstdout:\n")
+            stream.write(decode_shell_output(stdout))
+            stream.write("\nstderr:\n")
+            stream.write(decode_shell_output(stderr))
+        return f"\n[command log] {path}\nRead this saved output; do not rerun only to capture a log."
+    except OSError as exc:
+        return f"\n[command log unavailable] {type(exc).__name__}; captured output follows the normal limit."
 
 
 # --------------------------------------------------------------------------
@@ -405,6 +423,10 @@ _BASH_SCHEMA = {
     "type": "object",
     "properties": {
         "command": {"type": "string", "minLength": 1, "description": "Shell command to run."},
+        "task_reason": {"type": "string", "minLength": 1,
+                        "description": "Required for tests/builds/dependency installation: explain why execution is necessary for the current user request. An overview normally needs code inspection only."},
+        "rerun_reason": {"type": "string", "minLength": 1,
+                         "description": "Explain why repeating an unchanged check is itself necessary, e.g. investigating flakiness. Saving output alone is not a reason; check logs are saved automatically."},
         "timeout": {"type": "number", "exclusiveMinimum": 0, "description": "Seconds before the command is killed."},
     },
     "required": ["command"],
@@ -486,6 +508,8 @@ def register_basic_tools(registry: ToolRegistry,*,sandbox_enabled: bool=False) -
         "Do not use shell cat/sed/head/tail/type/Get-Content to inspect text files, find/ls/dir to "
         "discover files, or shell rg/grep/findstr/Select-String to search file contents. Do not bypass "
         "these requirements with scripts or host execution. "
+        "For tests/builds/dependency installation supply task_reason tied to the user's request. "
+        "Run checks directly to preserve exit status; full output is saved automatically. "
         + shell_guidance(sandbox_enabled=sandbox_enabled),
         _BASH_SCHEMA,
         run_bash,

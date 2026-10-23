@@ -35,6 +35,8 @@ def shell_guidance(*,sandbox_enabled: bool=False) -> str:
             "which is the mounted host project directory. "
             "Use Linux Bash syntax and container paths in shell commands. "
             "Bash pipefail is enabled: a failed pipeline stage is reported even if tail/head succeeds. "
+            "For recognized tests/builds, run the check directly: output is saved automatically, "
+            "and pipelines/fallbacks that could hide its exit status are rejected. "
             "A producer may report SIGPIPE when head stops reading; inspect that cause instead of "
             "treating every nonzero pipeline as a dependency problem. "
             "Python is available as python3. "

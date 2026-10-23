@@ -24,7 +24,7 @@ class ToolResult(str):
     def __new__(cls, text: str, *, ok: bool = True, error_code: str | None = None,
                 field: str | None = None, action: str = "none",
                 transient: bool = False, execution_status: str = "succeeded",
-                inspected_path: str | None = None):
+                inspected_path: str | None = None, command_log: str | None = None):
         obj = super().__new__(cls, text)
         obj.ok = ok                       # 工具是否成功
         obj.error_code = error_code       # 错误类别
@@ -33,6 +33,7 @@ class ToolResult(str):
         obj.transient = transient         # 是否属于临时故障
         obj.execution_status = execution_status  # 操作执行到了什么状态
         obj.inspected_path = inspected_path  # 供内部状态恢复使用
+        obj.command_log = command_log  # Full captured check output, when saved.
         return obj
 
     @classmethod

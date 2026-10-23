@@ -1,10 +1,10 @@
 # minicode
 
-原项目名为 HarnessAgent，现统一使用 `minicode`。CLI 使用 `python -m minicode`，Web 使用 `python -m minicode.web`；原来的 `python -m agent` 和 `python -m agent.web` 仍可使用。代码中的核心实现仍位于 `agent/`。本文示例中的 `D:\HarnessAgent` 是当前本机项目目录，项目名称不要求与目录名一致。
-
 用 Python 实现的模块化编码 Agent：模型负责决定下一步，运行时负责工具执行、权限检查、上下文管理、任务协作和运行记录。
 
-项目参考 [learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) 的 Agent 构建思路，提供普通 CLI、Textual 终端界面和可选的 Docker 工具沙箱。支持 DeepSeek、Anthropic，以及无需 API 的离线 Mock 模式。
+提供普通 CLI、Textual 终端界面、浏览器工作台和可选的 Docker 工具沙箱。支持 DeepSeek、Anthropic，以及无需 API 的离线 Mock 模式。
+
+CLI 使用 `python -m minicode`，Web 使用 `python -m minicode.web`。核心实现位于 `agent/`，也兼容 `python -m agent` 和 `python -m agent.web` 启动方式。
 
 ## 功能概览
 
@@ -28,9 +28,12 @@
 
 ## 快速开始
 
-以下命令以 Windows PowerShell 为例，建议使用 Python 3.11 或更新版本。在项目根目录执行：
+以下命令以 Windows PowerShell 为例，建议使用 Python 3.11 或更新版本：
 
 ```powershell
+git clone https://github.com/LeiMikasa/minicode.git
+cd minicode
+
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
@@ -98,7 +101,7 @@ Web 使用 **Vue 3 + TypeScript + Vite** 前端和 **FastAPI** 后端。复用�
 首次使用，在项目根目录执行：
 
 ```powershell
-cd D:\HarnessAgent
+# 在项目根目录执行
 .\.venv\Scripts\python.exe -m pip install -r requirements-web.txt
 cd web
 npm.cmd install
@@ -134,7 +137,8 @@ cd ..
 开发前端时保留 Python 服务，再开一个终端：
 
 ```powershell
-cd D:\HarnessAgent\web
+# 在项目根目录执行
+cd web
 npm.cmd run dev
 ```
 
@@ -230,6 +234,14 @@ TUI 中 Enter 发送、Ctrl+J 换行、Ctrl+P/N 浏览输入历史、Ctrl+T 切�
 右下角显示主 Agent 最近一次请求的上下文估计、压缩预算、剩余和占用百分比，每轮压缩处理后更新；窄窗口收起侧栏时，在输入框附近保留简洁提示。默认预算 200,000 个估计 token，估计值已含 20% 余量；这是距压缩阈值的空间，不是模型容量或累计账单。关闭压缩时只显示估计输入量，右侧会话累计 token 仍取接口 `usage`。
 
 完整面板还分别显示提示词、工具定义、工具结果、对话消息和请求结构的估计 token，各项之和等于总占用。工具结果从对话消息中单独扣出，避免重复统计；日志的 `context_prepared` 事件也记录相同分项。
+
+## 执行范围与重复检查
+
+项目分析默认通过阅读代码完成；修复任务执行与变动相关的验证。常见测试、构建和依赖安装命令需要提供 `task_reason`，说明与当前请求的关系，不需要用户逐次确认。
+
+同一轮请求内，已完成的常见检查在工作区输入未变时会被拦截重复执行，即使换了超时设置或日志输出路径。针对偶发问题的必要复跑可提供 `rerun_reason`。检查捕获的完整输出会保存到当前状态目录的 `command-logs/`，工具结果附带路径；可能掩盖检查失败的管道、分号后续命令和失败兜底会被拒绝。
+
+命令识别与快照都有明确边界，详见[执行范围与重复验证控制](docs/执行范围与重复验证控制.md)。
 
 ## Docker 工具沙箱
 

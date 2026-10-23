@@ -77,6 +77,13 @@ def _command_kinds(command: str) -> set[str]:
         if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?|py", program):
             if program == "py" and arguments and re.fullmatch(r"-\d+(?:\.\d+)*", arguments[0]):
                 arguments = arguments[1:]
+            while arguments:
+                if arguments[0] in {"-X", "-W"} and len(arguments) >= 2:
+                    arguments = arguments[2:]
+                elif arguments[0] in {"-I", "-E", "-s", "-S", "-B", "-u", "-q"}:
+                    arguments = arguments[1:]
+                else:
+                    break
             if arguments[:2] == ["-m", "pip"] and arguments[2:3] == ["install"]:
                 kinds.add("dependency-install")
             if arguments[:2] in (["-m", "pytest"], ["-m", "unittest"]):

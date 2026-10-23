@@ -20,6 +20,27 @@
 
 两组任务文本、历史和初始文件完全相同。只改变 `Runtime(..., compaction_enabled=...)`，使用生产压缩阈值。公共环境说明解释历史日志已不存在、归档标记指向历史快照；它对两组相同，不提供答案、专用搜索关键词或预知的归档文件名。基础工具执行读取与检索，没有新增搜索历史工具。
 
+## DeepSeek 真实模型接入
+
+新版入口支持 `--provider deepseek`，通过项目已有的 Anthropic 兼容客户端直接调用 DeepSeek，使用原生工具调用。默认沿用 `.env` 中的 `MODEL_ID`、`ANTHROPIC_BASE_URL` 和密钥，也可用 `--model` 单独指定评测模型，不修改日常配置。当前项目的 `MODEL_ID=deepseek-flash`。
+
+默认仍是一组免费的 Mock；只有显式选择 DeepSeek 才运行付费模型。可以先查看计划，不发送请求：
+
+```powershell
+# 查看五类各一个场景的计划，共 10 次 Agent 运行；不调用模型
+.\.venv\Scripts\python.exe -m evals.recall_real --provider deepseek --limit 5 --plan
+
+# 真正开始小批评测，会消耗 DeepSeek API 额度
+.\.venv\Scripts\python.exe -m evals.recall_real --provider deepseek --limit 5
+
+# 只测一个指定场景：full / compact 各一次
+.\.venv\Scripts\python.exe -m evals.recall_real --provider deepseek --ids live-files-orders
+```
+
+每次 Agent 运行可能有多次模型调用。模型、服务地址、代码摘要、场景和预算保存在批次配置里，续跑时必须一致；密钥不写入批次配置。`--all` 才选择全部 50 个场景、共 100 次 Agent 运行。默认模型 ID 若是滚动别名，记录这个 ID 并不等于锁定服务端权重版本。
+
+DeepSeek 报告记录 API 返回的实际 token 用量，包含摘要调用，不包含 Codex CLI 开销。缺失用量保持未知，不根据 token 数自动推算账单。`--max-tokens` 是传给 API 的输出上限；`--timeout` 在模型调用前检查整例剩余预算，并据此限制 SDK 等待、禁用评测请求的 SDK 自动重试，不保证强制中断已经进行的任意本地文件操作。认证、余额、配额或限流错误会停止批次；其他模型/运行时调用连续失败三次也会停止。
+
 ## Codex 真实模型接入
 
 `evals/codex_llm.py` 只用于评测，不修改日常 DeepSeek 或 Anthropic 配置。它调用本机已安装、已通过 ChatGPT 登录的 Codex CLI。每次模型请求启动一个新的临时会话，禁用用户配置、Shell、插件、Hooks、队友、记忆和联网搜索。模型只能返回 JSON 格式的正文或工具请求，真实文件工具仍由 minicode 的 `execute_tool` 执行，权限、恢复和压缩也由 minicode 负责。
@@ -57,7 +78,16 @@ CLI 在独立空目录启动；若事件流表明它执行了自己的工具，�
 
 - `report.md`、`summary.json`：事实召回、正确拒答、整例成功率、双方 token、配对比较。
 - 每例 `result.json`：逐项对错、结束原因、压缩是否触发、工具调用数、输入文件是否被修改。
+- 每例 `trace/timeline.md`：按调用顺序阅读模型可见回复、工具请求和结果预览，先看这个定位空转发生在哪一轮。
+- 每例 `trace/model-calls/call-*/request.json`、`response.json`、`error.json`：模型输入、响应及调用异常；不包含 SDK 凭据、HTTP 请求头或验收器答案表。
+- 每例 `trace/tools.jsonl`：完整工具参数和工具返回文本（工具本身的输出上限仍有效），包含未执行的参数校验和权限拒绝。
 - `transport/call-*/request.json`、`events.jsonl`：真实请求与 CLI 原始事件，供本地排查，不应提交到公开仓库。
+
+详细日志只在本地评测中记录，位于每例 `workspace` 的外面，Agent 无权通过文件工具读取它们。记录时遮蔽已配置的 API 密钥，不保存 SDK 客户端或回调。日志写入失败会记录到 `result.json` 的 `local_trace_errors`，不会将模型或工具的成功结果改成失败。日志仍包含题目与模型输出，不应提交到公开仓库。常规运行的 `RunTrace` 继续只记录指纹和统计信息。
+
+运行时现在提供两条通用引导：先使用对话已有证据，再按真实归档标记补缺口；证据足够后提交用户要求的产物。最后三轮会提醒剩余预算，但不会自动写答案、猜未知信息或取消必要工具。这些引导对 full / compact 同时生效；题目、标准答案和评分保持不变。它们是否改善真实模型表现，需要重新跑小样本验证，离线测试不能代替这个结论。
+
+本次代码与提示词发生变化，旧批次的代码摘要不同，不能直接 `--resume` 混跑。应新建批次，保留原失败记录，用相同场景比较。
 
 失败或未完成的例子仍进入任务召回分母。先检查是否完成、答案是否正确、是否实际压缩，再比较双方 token 和耗时。单次试跑只能验证链路并发现问题，不能据此宣称普遍召回率或节省比例。
 

@@ -28,6 +28,7 @@ from agent.runtime import Runtime
 from evals.context_compaction import ALLOWED_TOOLS, MeasuredLLM
 from evals.recall_cases import DATASET_SEED, DATASET_VERSION, FAMILIES, grade_answer, load_specs, materialize
 from evals.token_usage import TOKEN_FIELDS, aggregate_token_usage, summarize_calls, token_comparison
+from evals.local_trace import EvaluationTrace
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,6 +48,7 @@ def suite_signature() -> str:
     paths = sorted((ROOT / "agent").rglob("*.py")) + [
         Path(__file__), ROOT / "evals" / "recall_cases.py",
         ROOT / "evals" / "context_compaction.py", ROOT / "evals" / "token_usage.py",
+        ROOT / "evals" / "local_trace.py",
     ]
     signature = hashlib.sha256()
     for path in paths:
@@ -84,14 +86,38 @@ class SuiteMockLLM:
 
 
 class CheckpointLLM(MeasuredLLM):
-    def __init__(self, inner, checkpoint: Path):
+    def __init__(self, inner, checkpoint: Path, *, deadline: float | None = None,
+                 payload_trace: EvaluationTrace | None = None):
         super().__init__(inner)
         self.checkpoint = checkpoint
+        self.deadline = deadline
+        self.payload_trace = payload_trace
 
     def create(self, **kwargs):
+        sdk = getattr(self.inner, "_client", None)
+        call_dir = None
         try:
-            return super().create(**kwargs)
+            if self.deadline is not None:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Evaluation run deadline reached before the next model call")
+                if sdk is not None:
+                    # Evaluation-only budget: prevent SDK retries from multiplying
+                    # a paid request's wait beyond the remaining run budget.
+                    self.inner._client = sdk.with_options(timeout=remaining, max_retries=0)
+            if self.payload_trace:
+                call_dir = self.payload_trace.request({**kwargs, "model": self.model})
+            response = super().create(**kwargs)
+            if self.payload_trace:
+                self.payload_trace.response(call_dir, response)
+            return response
+        except BaseException as exc:
+            if self.payload_trace and call_dir is not None:
+                self.payload_trace.error(call_dir, exc)
+            raise
         finally:
+            if sdk is not None:
+                self.inner._client = sdk
             save_json(self.checkpoint, {
                 "model_calls": self.calls, "summary_calls": self.summary_calls,
                 "tool_calls": self.tool_calls, "context_errors": self.context_errors,
@@ -119,8 +145,10 @@ def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
               "question_sha256": digest(case["prompt"]), "workspace": str(workspace)}
     save_json(run_dir / "case.json", case)  # outside the tool-accessible workspace
     started = time.perf_counter()
+    deadline = time.monotonic() + run_timeout if run_timeout is not None else None
     runtime = None
     llm = None
+    payload_trace = None
     try:
         if provider == "codex":
             from evals.codex_llm import CodexLLM
@@ -128,19 +156,23 @@ def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
                                 workdir=workspace, state_dir=workspace / ".agent", skill_dirs=[],
                                 max_turns=max_turns, max_tokens=max_tokens)
             client = CodexLLM(model, run_dir / "transport")
-            if run_timeout is not None:
-                client.deadline = time.monotonic() + run_timeout
+            if deadline is not None:
+                client.deadline = deadline
         else:
             settings = load_settings(provider=provider, model=model or ("mock-1" if provider == "mock" else None),
                                      workdir=workspace, state_dir=workspace / ".agent", skill_dirs=[],
                                      max_turns=max_turns, max_tokens=max_tokens)
-            client = SuiteMockLLM(case) if provider == "mock" else build_client(settings)
         result["model"] = settings.model
         if provider not in {"mock", "codex"} and not settings.api_key:
             raise RuntimeError("API key is missing")
-        llm = CheckpointLLM(client, run_dir / "telemetry.json")
+        if provider != "codex":
+            client = SuiteMockLLM(case) if provider == "mock" else build_client(settings)
+        payload_trace = EvaluationTrace(run_dir / "trace", secrets=(settings.api_key,))
+        llm = CheckpointLLM(client, run_dir / "telemetry.json", deadline=deadline,
+                            payload_trace=payload_trace)
         runtime = Runtime(settings, llm, teams_enabled=False, memory_enabled=False,
                           compaction_enabled=mode == "compact", approval=DENY)
+        runtime.lead_ctx.extra["observe_tool_result"] = payload_trace.tool_result
         for name in runtime.tools.names():
             if name not in ALLOWED_TOOLS:
                 runtime.tools.unregister(name)
@@ -163,6 +195,10 @@ def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
         result["tool_result_files"] = len(list((settings.state_dir / "tool-results").glob("*")))
         result["compaction_triggered"] = bool(result["archive_files"] or result["tool_result_files"] or llm.summary_calls)
         result["compaction_notes"] = list(runtime.compactor.notes)
+    except KeyboardInterrupt:
+        result["status"] = "interrupted"
+        result["error"] = "Stopped by user"
+        raise
     except Exception as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"[:500]
     finally:
@@ -170,6 +206,9 @@ def run_worker(spec: dict[str, Any], mode: str, run_dir: Path, provider: str,
             result["tool_attempts"] = runtime.lead_ctx.extra.get("tool_attempts", [])
             runtime.close()
         result["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+        if payload_trace is not None:
+            result["local_trace_dir"] = str(payload_trace.directory)
+            result["local_trace_errors"] = payload_trace.errors
         if llm:
             result.update({"model_calls": llm.calls, "summary_calls": llm.summary_calls,
                            "tool_calls": llm.tool_calls, "context_errors": llm.context_errors,

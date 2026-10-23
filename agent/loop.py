@@ -39,6 +39,7 @@ from .events import POST_TOOL_USE, PRE_TOOL_USE, STOP, Hooks, StopDirective
 from .llm import LLMClient, extract_text, extract_thinking, make_tool_result, tool_use_blocks
 from .tools.registry import ToolContext, ToolRegistry
 from .tools.feedback import CommandFeedback, ExecutionFeedback
+from .tools.execution import ExecutionGuard
 from .tools.result import ToolResult
 from .tools.recovery import ToolRecovery
 from .ui_events import UIEvent
@@ -68,6 +69,7 @@ def execute_tool(
     ctx: ToolContext, #本次调用的环境
     hooks: Hooks, # 钩子注册表
     recovery: ToolRecovery | None = None,
+    execution_guard: ExecutionGuard | None = None,
 ) -> ToolResult:
     """PreToolUse -> handler -> PostToolUse.
 
@@ -92,6 +94,15 @@ def execute_tool(
     key = recovery.key(name, args, ctx) # 创建唯一key
 
     def finish(output: ToolResult) -> ToolResult:
+        if execution_guard is not None:
+            execution_guard.after(output, ctx)
+        observer = ctx.extra.get("observe_tool_result")
+        if observer:
+            try:
+                observer(block, output)
+            except Exception as exc:
+                if isinstance(trace, RunTrace):
+                    trace.record("tool_observer_error", error_type=type(exc).__name__)
         if isinstance(trace, RunTrace):
             trace.tool_finished(trace_name, args, output, ctx,
                                 read_only=bool(tool and tool.read_only),
@@ -110,6 +121,11 @@ def execute_tool(
     if invalid is not None:
         recovery.record(name, args, invalid, phase="validation", attempt=0)
         return finish(recovery.observe(key, invalid))
+    if execution_guard is not None:
+        blocked = execution_guard.before(name, args, tool, ctx)
+        if blocked is not None:
+            recovery.record(name, args, blocked, phase="execution_guard", attempt=0)
+            return finish(blocked)
     for attempt in range(1, recovery.max_retries + 2):
         # Re-check permission for EVERY attempt; never reuse an escape approval.
         clear_call_permissions()
@@ -170,6 +186,7 @@ def run_loop(
     command_note = ""
     command_feedback = CommandFeedback()
     execution_feedback = ExecutionFeedback()
+    execution_guard = ExecutionGuard()
     result = LoopResult() # 创建默认结果对象
     recovery = ToolRecovery()
     ctx.extra["tool_attempts"] = recovery.events
@@ -222,6 +239,17 @@ def run_loop(
         execution_note = execution_feedback.render(ctx)
         if execution_note:
             system_prompt += "\n\n" + execution_note
+        # Advisory only: do not fabricate completion or interrupt a tool batch.
+        remaining = max(1, max_turns) - turn + 1
+        if max_turns >= 4 and remaining <= 3:
+            system_prompt += (
+                f"\n\n[turn budget] {remaining} model rounds remain, including this one. "
+                "Review the current request against evidence already obtained. If sufficient, "
+                "produce the requested artifact and final answer now. Before another inspection, "
+                "identify a specific unresolved requirement it will address. If blocked, report "
+                "the missing evidence accurately; do not guess, weaken requirements, or claim "
+                "unverified work is complete. This is a budget reminder, not proof of completion."
+            )
 
         # -- re-read the tool pool on EVERY iteration ----------------------
         # Not an optimisation detail: `connect_mcp` adds tools mid-turn, so a
@@ -409,7 +437,7 @@ def run_loop(
             started = time.monotonic()
             ui_call_id = uuid.uuid4().hex
             ui("tool_start", ui_call_id, label, arguments=block.get("input", {}), workdir=str(ctx.workdir))
-            output = execute_tool(block, registry, ctx, hook_registry, recovery)
+            output = execute_tool(block, registry, ctx, hook_registry, recovery, execution_guard)
             ui("tool_end", ui_call_id, str(output)[:8000], ok=output.ok,
                error_code=output.error_code, elapsed=time.monotonic() - started, result_chars=len(output))
             tool = registry.get(name) if isinstance(name, str) else None

@@ -1,6 +1,6 @@
-"""Run rebuilt realistic recall cases with the real minicode loop and Codex CLI.
+"""Run rebuilt realistic recall cases with minicode and DeepSeek or Codex.
 
-Default: one free mock pair. Real runs require --provider codex. --all is an
+Default: one free mock pair. Real runs require an explicit provider. --all is an
 explicit opt-in to 100 Agent runs; each run may make several Codex requests.
 """
 
@@ -17,6 +17,7 @@ import sys
 import uuid
 
 from agent.context import ContextCompactor
+from agent.config import load_settings
 from evals.realistic_cases import (DATASET, DATASET_SEED, DATASET_VERSION, FAMILIES,
                                    grade, load_specs, materialize)
 from evals.recall50 import ROOT, digest, run_worker, save_json, suite_signature, summarize, write_report
@@ -55,14 +56,27 @@ def ensure_plan_auth():
 def write_real_report(batch, records, config):
     summary = summarize(records, config)
     summary["dataset_name"] = "minicode-realistic-recall50"
+    if config["provider"] == "codex":
+        provider_note = (
+            "Fresh ephemeral Codex session per model request, built-in tools disabled and checked. "
+            "minicode executes file tools and compression. JSON tool calls are an evaluation transport, "
+            "not native API function calls. Token usage includes Codex CLI system/protocol overhead; "
+            "cached input is a subset of input, not extra input. Missing usage remains unknown. "
+            "Requested max_tokens is a prompt hint, not an enforced CLI output limit. ")
+    elif config["provider"] == "deepseek":
+        provider_note = (
+            "DeepSeek uses the configured Anthropic-compatible API with native tool calls. "
+            "Reported token usage comes from API responses, including summary calls; no Codex CLI "
+            "overhead is included. max_tokens is sent as the API output limit. Missing usage remains "
+            "unknown, and cached input is not added blindly to provider input tokens. ")
+    else:
+        provider_note = "Mock validates evaluation plumbing only, with no real model requests. "
     summary["measurement_note"] = (
-        "50 synthetic work-handoff conditions, not real production samples. "
-        "Fresh ephemeral Codex session per model request, built-in tools disabled and checked. "
-        "minicode executes file tools and compression. JSON tool calls are an evaluation transport, "
-        "not native API function calls. Token usage includes Codex CLI system/protocol overhead; "
-        "cached input is a subset of input, not extra input. Missing usage remains unknown. "
-        "Requested max_tokens is a prompt hint, not an enforced CLI output limit. "
+        "50 synthetic work-handoff conditions, not real production samples. " + provider_note +
         "Only actually triggered compression can support compression conclusions. "
+        "Both arms use the same general history-first/completion guidance and remaining-turn "
+        "reminders; no grader answers are injected. Detailed local payloads are stored outside "
+        "the tool workspace in each run's trace/ directory. "
         "Mock scores only validate the harness and must not be reported as model recall.")
     write_report(batch, summary)
     report = batch / "report.md"
@@ -78,6 +92,10 @@ def write_real_report(batch, records, config):
         text += (f"| {record['case_id']} | {record['mode']} | {first_input if first_input is not None else '未知'} | "
                  f"{total_input if total_input is not None else '未知'} | {record.get('tool_calls', '未知')} |\n")
     text += "\n首次请求变短不保证累计输入减少：后续归档读取、工具回显和额外模型轮次都会再次计入输入。\n"
+    text += ("\n## 排查每轮行为\n\n每个场景、每种模式下的 `trace/timeline.md` 按顺序展示模型可见回复、"
+             "工具参数及结果预览；`trace/model-calls/call-*/request.json` 和 `response.json` 保留完整调用内容，"
+             "失败时写入 `error.json`。`trace/tools.jsonl` 保留完整工具结果，包括权限和参数校验拒绝。"
+             "这些文件位于模型工作区外，不会作为新增题目资料提供给 Agent。\n")
     text += ("\n\n## 本批评测边界\n\n" + summary["measurement_note"]
              + "\n\n本批次的历史和任务相同，压缩阈值使用生产默认值，没有为通过评测降低阈值。"
              "所有逐项答案、未知信息拒答和输入文件完整性均由 Python 独立验收。\n")
@@ -87,8 +105,8 @@ def write_real_report(batch, records, config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", choices=("mock", "codex"), default="mock")
-    parser.add_argument("--model", default="gpt-6.1-sol", help="Pinned Codex model for reproducibility")
+    parser.add_argument("--provider", choices=("mock", "codex", "deepseek"), default="mock")
+    parser.add_argument("--model", help="DeepSeek: use MODEL_ID from .env unless supplied; Codex: default gpt-6.1-sol")
     parser.add_argument("--ids")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--all", action="store_true", help="Run all 50 cases (100 Agent runs)")
@@ -104,11 +122,20 @@ def main():
     if sum(bool(value) for value in (args.ids, args.limit, args.all)) > 1:
         parser.error("Use only one of --ids, --limit and --all")
     specs = select_specs(args.ids, args.limit, args.all)
+    settings = load_settings(provider="deepseek", model=args.model) if args.provider == "deepseek" else None
+    if settings is not None:
+        model = settings.model
+    elif args.provider == "codex":
+        model = args.model or "gpt-6.1-sol"
+    else:
+        model = "recall50-smoke"
     config = {"dataset_version": DATASET_VERSION, "dataset_seed": DATASET_SEED,
               "dataset_sha256": digest(load_specs()), "suite_sha256": signature(),
-              "provider": args.provider, "model": args.model if args.provider == "codex" else "recall50-smoke",
+              "provider": args.provider, "model": model,
+              "base_url": settings.base_url if settings else None,
+              "local_trace_version": 1, "completion_guidance": "history-first+turn-budget-v1",
               "case_ids": [s["id"] for s in specs], "modes": ["full", "compact"], "repeats": 1,
-              "max_turns": args.max_turns, "max_tokens_hint": args.max_tokens, "timeout": args.timeout,
+              "max_turns": args.max_turns, "max_tokens": args.max_tokens, "timeout": args.timeout,
               "compaction_thresholds": {name: getattr(ContextCompactor, name) for name in (
                   "CONTEXT_TOKEN_LIMIT", "TOOL_RESULT_BATCH_TOKEN_LIMIT", "LARGE_RESULT_TOKEN_LIMIT",
                   "SUMMARY_INPUT_TOKEN_LIMIT", "SNIP_MAX_MESSAGES", "SNIP_KEEP_MESSAGES",
@@ -119,6 +146,8 @@ def main():
         return 0
     if args.provider == "codex":
         ensure_plan_auth()
+    elif settings is not None and not settings.api_key:
+        raise ValueError("DeepSeek API key is missing; no model requests started")
     batch = (args.resume or args.output / (
         f"realistic-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{args.provider}-{uuid.uuid4().hex[:6]}"
     )).resolve()
@@ -137,15 +166,18 @@ def main():
         order = config["modes"] if index % 2 == 0 else list(reversed(config["modes"]))
         for mode in order:
             run_dir = batch / spec["id"] / mode
+            record = None
             if (run_dir / "result.json").exists():
-                record = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
-            else:
+                saved = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+                if saved.get("status") != "interrupted":
+                    record = saved
+            if record is None:
                 if run_dir.exists():
                     run_dir.rename(run_dir.with_name(mode + "-interrupted-" + uuid.uuid4().hex[:6]))
                 run_dir.mkdir(parents=True)
                 print(f"[{len(records)+1}/{len(specs)*2}] {spec['id']}/{mode}: running", flush=True)
                 record = run_worker(spec, mode, run_dir, args.provider,
-                                    args.model if args.provider == "codex" else "recall50-smoke",
+                                    model,
                                     args.max_turns, args.max_tokens, case=materialize(spec),
                                     grader=grade, run_timeout=args.timeout)
             record["repeat"] = 1
@@ -161,8 +193,9 @@ def main():
                 record["status"] == "agent_error" and record.get("stop_reason") == "error")
             consecutive_call_errors = consecutive_call_errors + 1 if call_failed else 0
             if any(marker in error_text for marker in (
-                    "usage limit", "rate limit", "rate_limit", "quota", "out of credits", "insufficient credits")):
-                stop_reason = "Codex account usage/rate limit reached; remaining trials were not run"
+                    "usage limit", "rate limit", "rate_limit", "quota", "out of credits", "insufficient credits",
+                    "insufficient balance", "payment required", "authenticationerror", "401", "402")):
+                stop_reason = f"{args.provider} account authentication/balance/usage/rate limit reached; remaining trials were not run"
             elif consecutive_call_errors >= 3:
                 stop_reason = "Three consecutive model/runtime call failures; remaining trials were not run"
             if stop_reason:

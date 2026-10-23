@@ -1,8 +1,8 @@
 # Agent 任务评测（试运行）
 
-## 新版工作交接场景与 Codex 真实模型
+## 新版工作交接场景与 DeepSeek / Codex 真实模型
 
-新增独立的 50 个合成场景：任务交接、需求修订、相似项目干扰、文件状态变化和混合历史，各 10 例。每例 8 项事实与 2 项未知信息；默认仅试跑一组成对 Mock。使用 `python -m evals.recall_real --provider codex --ids live-files-orders` 可通过本机 ChatGPT 登录的 Codex CLI 产生真实模型输出，工具、权限与压缩仍由 minicode 执行。会消耗 Codex 使用额度，token 包含 CLI 开销。完整规则和命令见 [新版评测说明](../docs/minicode新版召回评测.md)。旧数据集和报告保留。
+新增独立的 50 个合成场景：任务交接、需求修订、相似项目干扰、文件状态变化和混合历史，各 10 例。每例 8 项事实与 2 项未知信息；默认仅试跑一组成对 Mock。`python -m evals.recall_real --provider deepseek --limit 5 --plan` 仅查看计划，去掉 `--plan` 后使用 `.env` 当前模型进行原生 API 评测，会消耗 DeepSeek 额度。也可使用 `--provider codex --ids live-files-orders` 通过本机 ChatGPT 登录的 Codex CLI 产生真实输出，会消耗 Codex 使用额度，token 包含 CLI 开销。两种接入均由 minicode 执行工具、权限与压缩。完整规则和命令见 [新版评测说明](../docs/minicode新版召回评测.md)。旧数据集和报告保留。
 
 ## 50 组逐项召回与 token 对照
 
